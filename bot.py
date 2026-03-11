@@ -52,7 +52,7 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 # Конфигурация из переменных окружения
-BOT_TOKEN = os.getenv('8637433233:AAFxCQx5X6IHRoDNzoBsHRfMQHVwnVT0fIA')
+BOT_TOKEN = os.getenv('8637433233:AAEhCu4XR7ovs1XIZmk3uRy_h6YzHN-gDmA')
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден в переменных окружения!")
 
