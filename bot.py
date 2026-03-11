@@ -37,8 +37,20 @@ import io
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения
-load_dotenv()
+# ВРЕМЕННО: для отладки
+print("=== DEBUG INFO ===")
+print(f"BOT_TOKEN exists: {'Yes' if os.getenv('BOT_TOKEN') else 'No'}")
+print(f"BOT_TOKEN length: {len(os.getenv('BOT_TOKEN', '')) if os.getenv('BOT_TOKEN') else 0}")
+print(f"ADMIN_IDS: {os.getenv('ADMIN_IDS')}")
+print("==================")
 
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN:
+    # ВРЕМЕННО: для теста можно захардкодить (НО ПОТОМ УДАЛИТЬ!)
+    # BOT_TOKEN = "НОВЫЙ_ТОКЕН_СЮДА"
+    # print("⚠️ Использую захардкоженный токен для теста!")
+    # else:
+    raise ValueError("BOT_TOKEN не найден в переменных окружения!")
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
