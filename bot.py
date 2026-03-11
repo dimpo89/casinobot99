@@ -1,7 +1,7 @@
 import os
 import sys
-import logging
 import asyncio
+import logging
 import random
 import string
 import json
@@ -22,23 +22,37 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    LabeledPrice, PreCheckoutQuery
+    ChatMemberUpdated, ChatMember, LabeledPrice, PreCheckoutQuery,
+    ShippingQuery, SuccessfulPayment
 )
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter
+from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, IS_MEMBER, IS_NOT_MEMBER
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
-import aiohttp
 from aiohttp import web
 
 # Загружаем переменные окружения
 load_dotenv()
 
-# ========== ДИАГНОСТИКА ==========
-print("\n" + "="*50)
-print("🔍 ДИАГНОСТИКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ")
-print("="*50)
+# ============================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ
+# ============================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# ============================================
+# ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+# ============================================
+print("\n" + "="*60)
+print("🔍 ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ")
+print("="*60)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS')
@@ -48,59 +62,41 @@ if BOT_TOKEN:
     print(f"BOT_TOKEN length: {len(BOT_TOKEN)}")
     print(f"BOT_TOKEN starts with: {BOT_TOKEN[:10]}...")
 else:
-    print("❌ BOT_TOKEN не найден!")
-
-print(f"ADMIN_IDS: {ADMIN_IDS_STR if ADMIN_IDS_STR else '❌ не найден'}")
-print("="*50 + "\n")
-
-# Проверяем токен (ОДНА проверка)
-if not BOT_TOKEN:
     print("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не найден!")
-    print("Убедитесь, что переменная BOT_TOKEN задана в Environment на Render")
     sys.exit(1)
 
-# Проверяем ADMIN_IDS
-if not ADMIN_IDS_STR:
-    print("⚠️ ВНИМАНИЕ: ADMIN_IDS не найден, будет использован пустой список")
-    ADMIN_IDS = []
-else:
+print(f"ADMIN_IDS string: {ADMIN_IDS_STR if ADMIN_IDS_STR else '❌ не найден'}")
+
+# Парсим ADMIN_IDS
+ADMIN_IDS = []
+if ADMIN_IDS_STR:
     try:
-        ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_STR.split(',')]
-        print(f"✅ Загружены ADMIN_IDS: {ADMIN_IDS}")
-    except:
-        print(f"❌ Ошибка при парсинге ADMIN_IDS: {ADMIN_IDS_STR}")
-        ADMIN_IDS = []
-
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
-
-print("✅ Токен успешно загружен, продолжаем запуск...")
+        ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_STR.split(',') if id.strip()]
+        print(f"✅ ADMIN_IDS загружены: {ADMIN_IDS}")
+    except Exception as e:
+        print(f"❌ Ошибка парсинга ADMIN_IDS: {e}")
+else:
+    print("⚠️ ADMIN_IDS не заданы, админ-панель будет недоступна")
 
 # Конфигурация
 DATABASE_PATH = os.getenv('DATABASE_PATH', 'casino_bot.db')
+STAR_RATE = 1.0
 RTP_DISPLAY = 98.2
 RTP_ACTUAL = 76.82
 JACKPOT_PERCENT = 0.05
 MAX_BET = 1000000
 MIN_BET = 1
 
+print("="*60 + "\n")
+
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ========== ОСТАЛЬНОЙ КОД ВАШЕГО БОТА ==========
-# (весь остальной код из вашего bot.py вставьте сюда)
-# Начиная с класса GameType и до конца файла
-
-# Классы для игр
+# ============================================
+# КЛАССЫ ДЛЯ ИГР
+# ============================================
 class GameType(Enum):
     SLOT = "slot"
     DICE = "dice"
@@ -113,7 +109,9 @@ class GameType(Enum):
     KENO = "keno"
     WHEEL = "wheel"
 
-# Состояния FSM
+# ============================================
+# СОСТОЯНИЯ FSM
+# ============================================
 class BetStates(StatesGroup):
     waiting_for_bet = State()
     waiting_for_game_selection = State()
@@ -124,7 +122,9 @@ class BetStates(StatesGroup):
     waiting_for_bonus_code = State()
     waiting_for_faucet = State()
 
-# Инициализация базы данных
+# ============================================
+# ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
+# ============================================
 async def init_db():
     async with aiosqlite.connect(DATABASE_PATH) as db:
         # Таблица пользователей
@@ -276,8 +276,11 @@ async def init_db():
                         ('faucet_cooldown', '3600'))
         
         await db.commit()
+    logger.info("✅ База данных инициализирована")
 
-# Класс для работы с базой данных
+# ============================================
+# КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ
+# ============================================
 class Database:
     @staticmethod
     async def get_user(user_id: int) -> Optional[Dict]:
@@ -293,18 +296,18 @@ class Database:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             referral_code = Database.generate_referral_code()
             await db.execute('''
-                INSERT OR IGNORE INTO users 
+                INSERT OR REPLACE INTO users 
                 (user_id, username, first_name, last_name, referral_code, referred_by)
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (user_id, username, first_name, last_name, referral_code, referred_by))
             
             if referred_by:
-                # Начисляем бонус пригласившему
                 await db.execute('''
                     UPDATE users SET balance = balance + 50 WHERE user_id = ?
                 ''', (referred_by,))
             
             await db.commit()
+            logger.info(f"✅ Пользователь {user_id} создан/обновлен")
     
     @staticmethod
     def generate_referral_code(length: int = 8) -> str:
@@ -341,7 +344,6 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (game_id, user_id, game_type, bet_amount, win_amount, profit, json.dumps(game_data)))
             
-            # Обновляем статистику пользователя
             await db.execute('''
                 UPDATE users SET 
                     total_bets = total_bets + 1,
@@ -358,9 +360,6 @@ class Database:
                   user_id))
             
             await db.commit()
-            
-            # Проверяем и обновляем турниры
-            await Database.update_tournament_scores(user_id, game_type, bet_amount, win_amount)
     
     @staticmethod
     async def get_rtp_settings(game_type: str = None) -> Dict:
@@ -405,7 +404,7 @@ class Database:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cursor = await db.execute('SELECT amount FROM jackpot WHERE id = 1')
             result = await cursor.fetchone()
-            return result[0] if result else 0
+            return result[0] if result else 1000
     
     @staticmethod
     async def reset_jackpot(winner_id: int):
@@ -431,7 +430,6 @@ class Database:
             
             tournaments = await cursor.fetchall()
             for (tournament_id,) in tournaments:
-                # В турнирах считаем очки как win * 10 + bet
                 score = win * 10 + bet
                 await db.execute('''
                     INSERT INTO tournament_participants (tournament_id, user_id, score)
@@ -457,7 +455,9 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-# Базовый класс для игр
+# ============================================
+# БАЗОВЫЙ КЛАСС ДЛЯ ИГР
+# ============================================
 class BaseGame:
     def __init__(self, game_type: str):
         self.game_type = game_type
@@ -475,16 +475,16 @@ class BaseGame:
         raise NotImplementedError
     
     def get_provably_fair_seed(self, server_seed: str, client_seed: str, nonce: int) -> str:
-        """Генерация provably fair результата"""
         combined = f"{server_seed}:{client_seed}:{nonce}"
         return hashlib.sha256(combined.encode()).hexdigest()
     
     def get_random_number(self, min_val: int, max_val: int, seed: str) -> int:
-        """Получение случайного числа на основе seed"""
         hash_val = int(hashlib.sha256(seed.encode()).hexdigest(), 16)
         return min_val + (hash_val % (max_val - min_val + 1))
 
-# Класс для игры в слоты
+# ============================================
+# КЛАСС ДЛЯ ИГРЫ В СЛОТЫ
+# ============================================
 class SlotGame(BaseGame):
     def __init__(self):
         super().__init__("slot")
@@ -497,12 +497,10 @@ class SlotGame(BaseGame):
         self.rows = 3
     
     def generate_result(self, bet: int, user_id: int = None) -> Dict:
-        # Генерация provably fair seed
         server_seed = secrets.token_hex(32)
         client_seed = secrets.token_hex(16)
         nonce = secrets.randbelow(1000000)
         
-        # Создаем матрицу символов
         matrix = []
         for i in range(self.rows):
             row = []
@@ -512,7 +510,6 @@ class SlotGame(BaseGame):
                 row.append(self.symbols[symbol_index])
             matrix.append(row)
         
-        # Вычисляем выигрыш
         win_amount = self.calculate_win(bet, {"matrix": matrix})
         
         return {
@@ -535,12 +532,10 @@ class SlotGame(BaseGame):
                 multiplier = self.symbol_values.get(symbols[0], 1)
                 win += bet * multiplier
         
-        # Применяем RTP
         rtp_factor = self.actual_rtp / 100.0
         win = int(win * rtp_factor)
         
-        # Шанс на джекпот
-        if random.random() < 0.001:  # 0.1% шанс
+        if random.random() < 0.001:
             jackpot = asyncio.run(Database.get_jackpot())
             win += jackpot
             if win > 0:
@@ -550,42 +545,30 @@ class SlotGame(BaseGame):
     
     def get_paylines(self) -> List[List[int]]:
         return [
-            [0, 0, 0, 0, 0],  # Верхняя линия
-            [1, 1, 1, 1, 1],  # Средняя линия
-            [2, 2, 2, 2, 2],  # Нижняя линия
-            [0, 1, 2, 1, 0],  # V-образная
-            [2, 1, 0, 1, 2],  # Перевернутая V
-            [0, 0, 1, 2, 2],  # Диагональ
-            [2, 2, 1, 0, 0],  # Диагональ
+            [0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 1],
+            [2, 2, 2, 2, 2],
+            [0, 1, 2, 1, 0],
+            [2, 1, 0, 1, 2],
+            [0, 0, 1, 2, 2],
+            [2, 2, 1, 0, 0],
         ]
 
-# Класс для игры в кости
+# ============================================
+# КЛАСС ДЛЯ ИГРЫ В КОСТИ
+# ============================================
 class DiceGame(BaseGame):
     def __init__(self):
         super().__init__("dice")
-        self.multipliers = {
-            1: 6, 2: 3, 3: 2, 4: 1.5, 5: 1.2, 6: 1
-        }
+        self.multipliers = {1: 6, 2: 3, 3: 2, 4: 1.5, 5: 1.2, 6: 1}
     
     def generate_result(self, bet: int, user_id: int = None) -> Dict:
-        # Provably fair генерация
         server_seed = secrets.token_hex(32)
         client_seed = secrets.token_hex(16)
         nonce = secrets.randbelow(1000000)
         
         seed = self.get_provably_fair_seed(server_seed, client_seed, nonce)
-        
-        # Генерируем результат (1-6)
         result = self.get_random_number(1, 6, seed)
-        
-        # Проверяем RTP
-        current_rtp = asyncio.run(self.get_current_rtp())
-        rtp_adjustment = current_rtp / self.actual_rtp
-        
-        # Модифицируем результат согласно RTP
-        if random.random() > rtp_adjustment:
-            # Проигрышный результат
-            result = 1  # Самое маленькое число
         
         return {
             "result": result,
@@ -599,7 +582,9 @@ class DiceGame(BaseGame):
     def calculate_win(self, bet: int, result: Dict) -> int:
         return int(bet * result["multiplier"])
 
-# Класс для рулетки
+# ============================================
+# КЛАСС ДЛЯ РУЛЕТКИ
+# ============================================
 class RouletteGame(BaseGame):
     def __init__(self):
         super().__init__("roulette")
@@ -612,19 +597,9 @@ class RouletteGame(BaseGame):
                 self.colors[i] = "black"
         
         self.bet_types = {
-            "straight": 36,  # Прямая ставка на число
-            "split": 18,      # Сплит
-            "street": 12,     # Стрит
-            "corner": 9,      # Угол
-            "sixline": 6,     # Сикслайн
-            "column": 3,      # Колонка
-            "dozen": 3,       # Дюжина
-            "red": 2,         # Красное
-            "black": 2,       # Черное
-            "even": 2,        # Четное
-            "odd": 2,         # Нечетное
-            "low": 2,         # 1-18
-            "high": 2         # 19-36
+            "straight": 36, "split": 18, "street": 12, "corner": 9,
+            "sixline": 6, "column": 3, "dozen": 3, "red": 2,
+            "black": 2, "even": 2, "odd": 2, "low": 2, "high": 2
         }
     
     def generate_result(self, bet: int, user_id: int = None) -> Dict:
@@ -644,38 +619,29 @@ class RouletteGame(BaseGame):
             "hash": seed
         }
     
-    def calculate_win(self, bet: int, result: Dict, bet_type: str, bet_number: int = None) -> int:
+    def calculate_win(self, bet: int, result: Dict, bet_type: str = "red", bet_number: int = None) -> int:
         number = result["number"]
         
         if bet_type == "straight" and bet_number == number:
-            return bet * self.bet_types["straight"]
-        
-        elif bet_type == "split":
-            # Проверка соседних чисел
-            if bet_number and abs(bet_number - number) in [1, 3]:
-                return bet * self.bet_types["split"]
-        
+            return bet * 36
         elif bet_type == "red" and self.colors[number] == "red":
-            return bet * self.bet_types["red"]
-        
+            return bet * 2
         elif bet_type == "black" and self.colors[number] == "black":
-            return bet * self.bet_types["black"]
-        
+            return bet * 2
         elif bet_type == "even" and number > 0 and number % 2 == 0:
-            return bet * self.bet_types["even"]
-        
+            return bet * 2
         elif bet_type == "odd" and number % 2 == 1:
-            return bet * self.bet_types["odd"]
-        
+            return bet * 2
         elif bet_type == "low" and 1 <= number <= 18:
-            return bet * self.bet_types["low"]
-        
+            return bet * 2
         elif bet_type == "high" and 19 <= number <= 36:
-            return bet * self.bet_types["high"]
+            return bet * 2
         
         return 0
 
-# Класс для блэкджека
+# ============================================
+# КЛАСС ДЛЯ БЛЭКДЖЕКА
+# ============================================
 class BlackjackGame(BaseGame):
     def __init__(self):
         super().__init__("blackjack")
@@ -691,16 +657,11 @@ class BlackjackGame(BaseGame):
         client_seed = secrets.token_hex(16)
         nonce = secrets.randbelow(1000000)
         
-        # Создаем колоду
         deck = [(rank, suit) for suit in self.suits for rank in self.ranks]
-        
-        # Перемешиваем provably fair способом
         shuffled_deck = self.shuffle_deck(deck, server_seed, client_seed, nonce)
         
-        # Раздаем карты
         player_hand = [shuffled_deck[0], shuffled_deck[2]]
         dealer_hand = [shuffled_deck[1], shuffled_deck[3]]
-        
         remaining_deck = shuffled_deck[4:]
         
         return {
@@ -729,20 +690,18 @@ class BlackjackGame(BaseGame):
         player_score = self.calculate_hand_score(player_hand)
         dealer_score = self.calculate_hand_score(dealer_hand)
         
-        # Дилер добирает до 17
         while dealer_score < 17 and remaining_deck:
             dealer_hand.append(remaining_deck.pop(0))
             dealer_score = self.calculate_hand_score(dealer_hand)
         
-        # Проверяем результаты
         if player_score > 21:
-            return 0  # Игрок проиграл
+            return 0
         elif dealer_score > 21:
-            return bet * 2  # Дилер перебрал
+            return bet * 2
         elif player_score > dealer_score:
             return bet * 2
         elif player_score == dealer_score:
-            return bet  # Возврат ставки
+            return bet
         else:
             return 0
     
@@ -757,14 +716,15 @@ class BlackjackGame(BaseGame):
             else:
                 score += self.card_values[rank]
         
-        # Корректировка для тузов
         while score > 21 and aces > 0:
             score -= 10
             aces -= 1
         
         return score
 
-# Класс для Plinko
+# ============================================
+# КЛАСС ДЛЯ PLINKO
+# ============================================
 class PlinkoGame(BaseGame):
     def __init__(self):
         super().__init__("plinko")
@@ -789,7 +749,6 @@ class PlinkoGame(BaseGame):
         risk_levels = {"low": 16, "medium": 14, "high": 12}
         rows = risk_levels.get(risk, 14)
         
-        # Симуляция падения шарика
         path = []
         position = 0
         
@@ -802,15 +761,10 @@ class PlinkoGame(BaseGame):
                 position += 0.5
             path.append(direction)
         
-        # Округляем до ближайшего целого
         final_position = int(round(position + rows / 2))
         final_position = max(0, min(rows, final_position))
         
         multiplier = self.multipliers.get(rows, self.multipliers[14])[final_position]
-        
-        # Применяем RTP
-        current_rtp = asyncio.run(self.get_current_rtp())
-        multiplier *= (current_rtp / self.actual_rtp)
         
         return {
             "path": path,
@@ -827,11 +781,13 @@ class PlinkoGame(BaseGame):
     def calculate_win(self, bet: int, result: Dict) -> int:
         return int(bet * result["multiplier"])
 
-# Класс для Mines
+# ============================================
+# КЛАСС ДЛЯ MINES
+# ============================================
 class MinesGame(BaseGame):
     def __init__(self):
         super().__init__("mines")
-        self.grid_size = 5  # 5x5 сетка
+        self.grid_size = 5
         self.max_mines = 24
     
     def generate_result(self, bet: int, user_id: int = None, mines_count: int = 3) -> Dict:
@@ -839,7 +795,6 @@ class MinesGame(BaseGame):
         client_seed = secrets.token_hex(16)
         nonce = secrets.randbelow(1000000)
         
-        # Размещаем мины
         mine_positions = []
         all_positions = list(range(self.grid_size * self.grid_size))
         
@@ -865,25 +820,20 @@ class MinesGame(BaseGame):
         total_cells = self.grid_size * self.grid_size
         safe_cells = total_cells - mines_count
         
-        # Проверяем, не наступили ли на мину
         if any(cell in mine_positions for cell in revealed_cells):
             return 0
         
-        # Рассчитываем множитель
         revealed_count = len(revealed_cells)
         if revealed_count == 0:
             return 0
         
-        # Формула множителя: (total_cells - mines_count) / (total_cells - revealed_count - mines_count + 1)
         multiplier = (safe_cells) / (safe_cells - revealed_count + 1)
-        
-        # Применяем RTP
-        current_rtp = asyncio.run(self.get_current_rtp())
-        multiplier *= (current_rtp / self.actual_rtp)
         
         return int(bet * multiplier)
 
-# Основной класс бота
+# ============================================
+# ОСНОВНОЙ КЛАСС БОТА
+# ============================================
 class CasinoBot:
     def __init__(self):
         self.games = {
@@ -894,10 +844,10 @@ class CasinoBot:
             "plinko": PlinkoGame(),
             "mines": MinesGame()
         }
-        self.active_games = {}  # Хранит активные игры пользователей
+        self.active_games = {}
+        logger.info(f"✅ Игры загружены: {list(self.games.keys())}")
     
-    # Создание клавиатур
-    def get_main_keyboard(self, user_id: int, is_admin: bool = False) -> InlineKeyboardMarkup:
+    def get_main_keyboard(self, user_id: int) -> InlineKeyboardMarkup:
         buttons = [
             [InlineKeyboardButton(text="🎰 Слоты", callback_data="game_slot"),
              InlineKeyboardButton(text="🎲 Кости", callback_data="game_dice")],
@@ -913,8 +863,9 @@ class CasinoBot:
              InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")]
         ]
         
-        if is_admin:
+        if user_id in ADMIN_IDS:
             buttons.append([InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel")])
+            logger.info(f"👑 Админ-панель показана для пользователя {user_id}")
         
         return InlineKeyboardMarkup(inline_keyboard=buttons)
     
@@ -927,10 +878,9 @@ class CasinoBot:
                  InlineKeyboardButton(text="🎰 Крутить (50⭐)", callback_data="play_slot_50")],
                 [InlineKeyboardButton(text="🎰 Крутить (100⭐)", callback_data="play_slot_100"),
                  InlineKeyboardButton(text="🎰 Крутить (500⭐)", callback_data="play_slot_500")],
-                [InlineKeyboardButton(text="💰 Макс ставка", callback_data="play_slot_max"),
+                [InlineKeyboardButton(text="💰 Макс ставка", callback_data="play_slot_1000"),
                  InlineKeyboardButton(text="🔧 Своя ставка", callback_data="custom_bet_slot")]
             ]
-        
         elif game_type == "dice":
             buttons = [
                 [InlineKeyboardButton(text="🎲 Бросить (10⭐)", callback_data="play_dice_10"),
@@ -939,7 +889,6 @@ class CasinoBot:
                  InlineKeyboardButton(text="🎲 Бросить (500⭐)", callback_data="play_dice_500")],
                 [InlineKeyboardButton(text="🔧 Своя ставка", callback_data="custom_bet_dice")]
             ]
-        
         elif game_type == "roulette":
             buttons = [
                 [InlineKeyboardButton(text="🔴 Красное", callback_data="roulette_red"),
@@ -948,9 +897,15 @@ class CasinoBot:
                  InlineKeyboardButton(text="👥 Нечетное", callback_data="roulette_odd")],
                 [InlineKeyboardButton(text="1️⃣ 1-18", callback_data="roulette_low"),
                  InlineKeyboardButton(text="2️⃣ 19-36", callback_data="roulette_high")],
-                [InlineKeyboardButton(text="🎯 Число", callback_data="roulette_number")]
+                [InlineKeyboardButton(text="💰 Ставка", callback_data="roulette_bet")]
             ]
-        
+        elif game_type == "blackjack":
+            buttons = [
+                [InlineKeyboardButton(text="🃏 Играть (10⭐)", callback_data="play_blackjack_10"),
+                 InlineKeyboardButton(text="🃏 Играть (50⭐)", callback_data="play_blackjack_50")],
+                [InlineKeyboardButton(text="🃏 Играть (100⭐)", callback_data="play_blackjack_100"),
+                 InlineKeyboardButton(text="🔧 Своя ставка", callback_data="custom_bet_blackjack")]
+            ]
         elif game_type == "plinko":
             buttons = [
                 [InlineKeyboardButton(text="📌 Низкий риск", callback_data="plinko_low"),
@@ -958,27 +913,16 @@ class CasinoBot:
                 [InlineKeyboardButton(text="📌 Высокий риск", callback_data="plinko_high"),
                  InlineKeyboardButton(text="💰 Ставка", callback_data="plinko_bet")]
             ]
-        
         elif game_type == "mines":
-            if game_state and game_state.get("active"):
-                buttons = [
-                    [InlineKeyboardButton(text="💣 Открыть клетку", callback_data="mines_reveal")],
-                    [InlineKeyboardButton(text="💰 Забрать выигрыш", callback_data="mines_cashout")],
-                    [InlineKeyboardButton(text="🔄 Новая игра", callback_data="mines_new")]
-                ]
-            else:
-                buttons = [
-                    [InlineKeyboardButton(text="💣 3 мины", callback_data="mines_3"),
-                     InlineKeyboardButton(text="💣 5 мин", callback_data="mines_5")],
-                    [InlineKeyboardButton(text="💣 10 мин", callback_data="mines_10"),
-                     InlineKeyboardButton(text="💣 15 мин", callback_data="mines_15")],
-                    [InlineKeyboardButton(text="💰 Ставка", callback_data="mines_bet")]
-                ]
+            buttons = [
+                [InlineKeyboardButton(text="💣 3 мины", callback_data="mines_3"),
+                 InlineKeyboardButton(text="💣 5 мин", callback_data="mines_5")],
+                [InlineKeyboardButton(text="💣 10 мин", callback_data="mines_10"),
+                 InlineKeyboardButton(text="💰 Ставка", callback_data="mines_bet")]
+            ]
         
-        # Общие кнопки
         buttons.append([
-            InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"),
-            InlineKeyboardButton(text="📊 Правила", callback_data=f"rules_{game_type}")
+            InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")
         ])
         
         return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -993,20 +937,16 @@ class CasinoBot:
              InlineKeyboardButton(text="🎁 Бонус коды", callback_data="admin_bonuses")],
             [InlineKeyboardButton(text="⚙️ Общие настройки", callback_data="admin_settings"),
              InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-            [InlineKeyboardButton(text="📈 Логи", callback_data="admin_logs"),
-             InlineKeyboardButton(text="💾 Бэкап", callback_data="admin_backup")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
         ]
         return InlineKeyboardMarkup(inline_keyboard=buttons)
     
-    # Обработчики команд
     async def cmd_start(self, message: Message):
         user_id = message.from_user.id
         username = message.from_user.username
         first_name = message.from_user.first_name
         last_name = message.from_user.last_name
         
-        # Проверяем реферальный код
         args = message.text.split()
         referred_by = None
         if len(args) > 1:
@@ -1016,168 +956,103 @@ class CasinoBot:
                 if result:
                     referred_by = result[0]
         
-        # Создаем пользователя
         await Database.create_user(user_id, username, first_name, last_name, referred_by)
-        
-        # Получаем информацию о пользователе
         user = await Database.get_user(user_id)
         
         welcome_text = (
             f"🎰 Добро пожаловать в **Mega Casino**!\n\n"
             f"Самый высокий RTP в Telegram — **{RTP_DISPLAY}%**!\n"
-            f"Играй и выигрывай с нами!\n\n"
             f"👤 Ваш ID: `{user_id}`\n"
-            f"💰 Баланс: {user['balance']} ⭐\n\n"
+            f"💰 Баланс: {user['balance'] if user else 0} ⭐\n\n"
             f"Выберите игру в меню ниже:"
         )
         
         await message.answer(
             welcome_text,
-            reply_markup=self.get_main_keyboard(user_id, user.get('is_admin', 0))
+            reply_markup=self.get_main_keyboard(user_id)
         )
+        logger.info(f"✅ Пользователь {user_id} запустил бота")
     
     async def cmd_balance(self, message: Message):
         user_id = message.from_user.id
         user = await Database.get_user(user_id)
         
         if not user:
-            await message.answer("❌ Пользователь не найден")
+            await message.answer("❌ Пользователь не найден. Напишите /start")
             return
         
-        # Получаем статистику
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            cursor = await db.execute('''
-                SELECT COUNT(*), SUM(profit) FROM games WHERE user_id = ?
-            ''', (user_id,))
+            cursor = await db.execute('SELECT COUNT(*), SUM(profit) FROM games WHERE user_id = ?', (user_id,))
             games_count, total_profit = await cursor.fetchone()
-            
-            cursor = await db.execute('''
-                SELECT COUNT(*) FROM games WHERE user_id = ? AND profit > 0
-            ''', (user_id,))
-            wins_count = await cursor.fetchone()
-            wins_count = wins_count[0] if wins_count else 0
         
         balance_text = (
             f"💰 **Ваш баланс**\n\n"
             f"Баланс: **{user['balance']} ⭐**\n"
             f"Всего игр: **{games_count or 0}**\n"
-            f"Побед: **{wins_count}**\n"
             f"Общий профит: **{total_profit or 0} ⭐**\n"
-            f"VIP уровень: **{user['vip_level']}**\n"
-            f"Опыт: **{user['experience']}**\n\n"
-            f"Для пополнения баланса используйте кнопку ниже:"
+            f"VIP уровень: **{user['vip_level']}**\n\n"
         )
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="deposit")],
-            [InlineKeyboardButton(text="💸 Вывести средства", callback_data="withdraw")],
-            [InlineKeyboardButton(text="📊 Детальная статистика", callback_data="detailed_stats")],
+            [InlineKeyboardButton(text="💳 Пополнить", callback_data="deposit")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
         ])
         
         await message.answer(balance_text, reply_markup=keyboard)
     
-    async def process_deposit(self, callback: CallbackQuery):
+    async def play_game(self, callback: CallbackQuery, game_type: str, bet: int, **kwargs):
         user_id = callback.from_user.id
         
-        # Создаем инвойс для оплаты звездами
-        prices = [LabeledPrice(label="Пополнение баланса", amount=100)]  # 100 звезд
-        
-        # Формируем клавиатуру с вариантами пополнения
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="100 ⭐ - 100 ⭐", callback_data="deposit_100")],
-            [InlineKeyboardButton(text="500 ⭐ - 500 ⭐", callback_data="deposit_500")],
-            [InlineKeyboardButton(text="1000 ⭐ - 1000 ⭐", callback_data="deposit_1000")],
-            [InlineKeyboardButton(text="5000 ⭐ - 5000 ⭐", callback_data="deposit_5000")],
-            [InlineKeyboardButton(text="🔧 Другая сумма", callback_data="deposit_custom")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
-        ])
-        
-        await callback.message.edit_text(
-            "💳 **Пополнение баланса**\n\n"
-            "Выберите сумму пополнения:\n"
-            "Минимальная сумма: 100 ⭐\n"
-            "Максимальная сумма: 50000 ⭐",
-            reply_markup=keyboard
-        )
-    
-    async def process_withdraw(self, callback: CallbackQuery, state: FSMContext):
-        user_id = callback.from_user.id
-        user = await Database.get_user(user_id)
-        
-        if user['balance'] < 100:
-            await callback.answer("❌ Минимальная сумма для вывода 100 ⭐", show_alert=True)
-            return
-        
-        await callback.message.edit_text(
-            f"💸 **Вывод средств**\n\n"
-            f"Ваш баланс: {user['balance']} ⭐\n"
-            f"Минимальная сумма вывода: 100 ⭐\n"
-            f"Максимальная сумма вывода: {min(user['balance'], 50000)} ⭐\n\n"
-            f"Введите сумму для вывода:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="main_menu")]
-            ])
-        )
-        
-        await state.set_state(BetStates.waiting_for_withdrawal)
-    
-    # Обработчики игр
-    async def play_game(self, callback: CallbackQuery, game_type: str, bet: int):
-        user_id = callback.from_user.id
-        
-        # Проверяем баланс
         user = await Database.get_user(user_id)
         if not user:
-            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            await callback.answer("❌ Пользователь не найден. Напишите /start", show_alert=True)
             return
         
         if user['balance'] < bet:
             await callback.answer("❌ Недостаточно средств", show_alert=True)
             return
         
-        # Получаем игру
         game = self.games.get(game_type)
         if not game:
-            await callback.answer("❌ Игра не найдена", show_alert=True)
+            await callback.answer("❌ Игра временно недоступна", show_alert=True)
             return
         
-        # Генерируем результат
-        result = game.generate_result(bet, user_id)
+        if game_type == "roulette" and "bet_type" in kwargs:
+            result = game.generate_result(bet, user_id)
+            win_amount = game.calculate_win(bet, result, kwargs["bet_type"])
+        elif game_type == "plinko" and "risk" in kwargs:
+            result = game.generate_result(bet, user_id, kwargs["risk"])
+            win_amount = game.calculate_win(bet, result)
+        elif game_type == "mines" and "mines_count" in kwargs:
+            result = game.generate_result(bet, user_id, kwargs["mines_count"])
+            win_amount = 0
+            self.active_games[user_id] = {
+                "game": "mines",
+                "result": result,
+                "bet": bet,
+                "revealed": []
+            }
+        else:
+            result = game.generate_result(bet, user_id)
+            win_amount = game.calculate_win(bet, result)
         
-        # Рассчитываем выигрыш
-        win_amount = game.calculate_win(bet, result)
+        if game_type != "mines":
+            profit = win_amount - bet
+            await Database.update_balance(user_id, profit)
+            
+            jackpot_contribution = int(bet * JACKPOT_PERCENT)
+            await Database.update_jackpot(jackpot_contribution)
+            
+            await Database.add_game_history(user_id, game_type, bet, win_amount, result)
         
-        # Обновляем баланс
-        profit = win_amount - bet
-        await Database.update_balance(user_id, profit)
-        
-        # Отчисляем в джекпот
-        jackpot_contribution = int(bet * JACKPOT_PERCENT)
-        await Database.update_jackpot(jackpot_contribution)
-        
-        # Сохраняем историю
-        await Database.add_game_history(user_id, game_type, bet, win_amount, result)
-        
-        # Формируем сообщение с результатом
-        result_text = self.format_game_result(game_type, result, bet, win_amount)
-        
-        # Добавляем информацию о джекпоте
         jackpot = await Database.get_jackpot()
-        result_text += f"\n\n💰 Текущий джекпот: **{jackpot} ⭐**"
+        result_text = self.format_game_result(game_type, result, bet, win_amount)
+        result_text += f"\n\n💰 Джекпот: **{jackpot} ⭐**"
         
         await callback.message.edit_text(
             result_text,
             reply_markup=self.get_game_keyboard(game_type)
         )
-        
-        # Проверяем на выигрыш джекпота
-        if win_amount >= jackpot * 0.5:  # Если выиграли половину джекпота
-            await callback.message.answer(
-                f"🎉 **ПОЗДРАВЛЯЕМ!**\n\n"
-                f"Вы выиграли {win_amount} ⭐!\n"
-                f"Это близко к джекпоту!"
-            )
     
     def format_game_result(self, game_type: str, result: Dict, bet: int, win: int) -> str:
         if game_type == "slot":
@@ -1185,76 +1060,47 @@ class CasinoBot:
             result_str = "🎰 **Слоты**\n\n"
             for row in matrix:
                 result_str += " | ".join(row) + "\n"
-            result_str += f"\nСтавка: **{bet} ⭐**\n"
-        
         elif game_type == "dice":
-            result_str = (
-                f"🎲 **Кости**\n\n"
-                f"Результат: **{result['result']}**\n"
-                f"Множитель: **x{result['multiplier']}**\n"
-                f"Ставка: **{bet} ⭐**\n"
-            )
-        
+            result_str = f"🎲 **Кости**\n\nРезультат: **{result['result']}**\nМножитель: **x{result['multiplier']}**\n"
         elif game_type == "roulette":
+            result_str = f"🎡 **Рулетка**\n\nВыпало: **{result['number']}** {result['color']}\n"
+        elif game_type == "blackjack":
+            player_score = BlackjackGame().calculate_hand_score(result["player_hand"])
+            dealer_score = BlackjackGame().calculate_hand_score(result["dealer_hand"])
             result_str = (
-                f"🎡 **Рулетка**\n\n"
-                f"Выпало число: **{result['number']}**\n"
-                f"Цвет: **{result['color']}**\n"
-                f"Ставка: **{bet} ⭐**\n"
+                f"🃏 **Блэкджек**\n\n"
+                f"Ваши карты: {self.format_hand(result['player_hand'])} (очков: {player_score})\n"
+                f"Карты дилера: {self.format_hand(result['dealer_hand'])} (очков: {dealer_score})\n"
             )
-        
         elif game_type == "plinko":
-            result_str = (
-                f"📌 **Plinko**\n\n"
-                f"Позиция: **{result['final_position']}**\n"
-                f"Множитель: **x{result['multiplier']:.2f}**\n"
-                f"Риск: **{result['risk']}**\n"
-                f"Ставка: **{bet} ⭐**\n"
-            )
-        
+            result_str = f"📌 **Plinko**\n\nПозиция: **{result['final_position']}**\nМножитель: **x{result['multiplier']:.2f}**\nРиск: **{result['risk']}**\n"
         elif game_type == "mines":
-            result_str = (
-                f"💣 **Mines**\n\n"
-                f"Мин: **{result['mines_count']}**\n"
-                f"Открыто клеток: **{len(result.get('revealed', []))}**\n"
-                f"Ставка: **{bet} ⭐**\n"
-            )
-        
+            result_str = f"💣 **Mines**\n\nМин: **{result['mines_count']}**\n"
         else:
             result_str = f"Результат игры\n"
         
+        result_str += f"\nСтавка: **{bet} ⭐**\n"
         if win > 0:
             result_str += f"✅ Выигрыш: **{win} ⭐**"
         else:
             result_str += f"❌ Проигрыш"
         
-        # Добавляем provably fair информацию
         if "hash" in result:
             result_str += f"\n\n🔐 Provably Fair: `{result['hash'][:16]}...`"
         
         return result_str
     
-    # Админ панель
+    def format_hand(self, hand: List) -> str:
+        return " ".join([f"{rank}{suit}" for rank, suit in hand])
+    
     async def admin_panel(self, callback: CallbackQuery):
-        user_id = callback.from_user.id
-        
-        if user_id not in ADMIN_IDS:
-            await callback.answer("❌ У вас нет доступа", show_alert=True)
+        if callback.from_user.id not in ADMIN_IDS:
+            await callback.answer("❌ Доступ запрещен", show_alert=True)
             return
         
-        # Получаем статистику бота
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cursor = await db.execute('SELECT COUNT(*) FROM users')
             users_count = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute('SELECT SUM(profit) FROM games')
-            total_profit = (await cursor.fetchone())[0] or 0
-            
-            cursor = await db.execute('SELECT SUM(bet_amount) FROM games')
-            total_bets = (await cursor.fetchone())[0] or 0
-            
-            cursor = await db.execute('SELECT COUNT(*) FROM games WHERE created_at > datetime("now", "-1 day")')
-            daily_games = (await cursor.fetchone())[0]
         
         jackpot = await Database.get_jackpot()
         
@@ -1262,155 +1108,36 @@ class CasinoBot:
             f"👑 **Админ панель**\n\n"
             f"📊 **Общая статистика:**\n"
             f"Пользователей: **{users_count}**\n"
-            f"Всего ставок: **{total_bets} ⭐**\n"
-            f"Общий профит: **{total_profit} ⭐**\n"
-            f"Игр за 24ч: **{daily_games}**\n"
             f"Текущий джекпот: **{jackpot} ⭐**\n\n"
             f"Выберите действие:"
         )
         
         await callback.message.edit_text(admin_text, reply_markup=self.get_admin_keyboard())
     
-    async def admin_manage_rtp(self, callback: CallbackQuery):
-        if callback.from_user.id not in ADMIN_IDS:
-            await callback.answer("❌ Доступ запрещен", show_alert=True)
-            return
-        
-        # Получаем текущие настройки RTP
-        rtp_settings = await Database.get_rtp_settings()
-        
-        text = "🎮 **Управление RTP**\n\n"
-        text += f"Отображаемый RTP: **{RTP_DISPLAY}%**\n"
-        text += f"Базовый RTP: **{RTP_ACTUAL}%**\n\n"
-        text += "Текущие настройки по играм:\n"
-        
-        buttons = []
-        for game_type in self.games.keys():
-            settings = rtp_settings.get(game_type, {})
-            current = settings.get('current_rtp', RTP_ACTUAL)
-            game_names = {
-                "slot": "🎰 Слоты",
-                "dice": "🎲 Кости",
-                "roulette": "🎡 Рулетка",
-                "blackjack": "🃏 Блэкджек",
-                "plinko": "📌 Plinko",
-                "mines": "💣 Mines"
-            }
-            text += f"{game_names[game_type]}: **{current:.2f}%**\n"
-            buttons.append([InlineKeyboardButton(
-                text=f"Изменить {game_names[game_type]}",
-                callback_data=f"admin_rtp_{game_type}"
-            )])
-        
-        buttons.append([InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")])
-        
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    
-    async def admin_broadcast(self, callback: CallbackQuery, state: FSMContext):
-        if callback.from_user.id not in ADMIN_IDS:
-            await callback.answer("❌ Доступ запрещен", show_alert=True)
-            return
-        
+    async def show_tournaments(self, callback: CallbackQuery):
         await callback.message.edit_text(
-            "📢 **Рассылка**\n\n"
-            "Введите сообщение для рассылки всем пользователям:",
+            "🏆 **Турниры**\n\nФункция в разработке",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel")]
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
             ])
         )
-        
-        await state.set_state(BetStates.waiting_for_admin_action)
-        await state.update_data(admin_action="broadcast")
     
-    # Турниры
-    async def show_tournaments(self, callback: CallbackQuery):
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('''
-                SELECT * FROM tournaments 
-                WHERE status = 'active' AND end_date > CURRENT_TIMESTAMP
-                ORDER BY prize_pool DESC
-            ''')
-            tournaments = await cursor.fetchall()
-        
-        if not tournaments:
-            await callback.message.edit_text(
-                "🏆 **Турниры**\n\n"
-                "В данный момент нет активных турниров.\n"
-                "Следите за обновлениями!",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
-                ])
-            )
-            return
-        
-        text = "🏆 **Активные турниры**\n\n"
-        buttons = []
-        
-        for tournament in tournaments:
-            tournament = dict(tournament)
-            time_left = datetime.fromisoformat(tournament['end_date']) - datetime.now()
-            hours_left = int(time_left.total_seconds() / 3600)
-            
-            text += (
-                f"**{tournament['name']}**\n"
-                f"Призовой фонд: {tournament['prize_pool']} ⭐\n"
-                f"Игра: {tournament['game_type']}\n"
-                f"Осталось: {hours_left}ч\n\n"
-            )
-            
-            buttons.append([InlineKeyboardButton(
-                text=f"📊 {tournament['name']}",
-                callback_data=f"tournament_{tournament['tournament_id']}"
-            )])
-        
-        buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")])
-        
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    
-    # Бонусы и ежедневные награды
     async def show_bonuses(self, callback: CallbackQuery):
         user_id = callback.from_user.id
         
-        # Проверяем ежедневный бонус
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            cursor = await db.execute('''
-                SELECT last_claim, streak FROM daily_rewards WHERE user_id = ?
-            ''', (user_id,))
-            daily = await cursor.fetchone()
-        
-        now = datetime.now()
-        can_claim_daily = True
-        streak = 0
-        
-        if daily:
-            last_claim = datetime.fromisoformat(daily[0])
-            streak = daily[1]
-            if last_claim.date() == now.date():
-                can_claim_daily = False
-        
-        # Получаем настройки крана
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cursor = await db.execute('SELECT value FROM settings WHERE key = "faucet_amount"')
             faucet_amount = int((await cursor.fetchone())[0])
-            
-            cursor = await db.execute('SELECT value FROM settings WHERE key = "faucet_cooldown"')
-            faucet_cooldown = int((await cursor.fetchone())[0])
         
         text = (
             "🎁 **Бонусы и награды**\n\n"
-            f"📅 **Ежедневный бонус**\n"
-            f"Текущая серия: **{streak} дней**\n"
-            f"Доступен: {'✅' if can_claim_daily else '❌'}\n\n"
             f"💧 **Кран**\n"
-            f"Сумма: **{faucet_amount} ⭐**\n"
-            f"Перезарядка: **{faucet_cooldown // 60} мин**\n\n"
+            f"Сумма: **{faucet_amount} ⭐**\n\n"
             f"🎫 **Бонус коды**\n"
             f"Введите код для активации"
         )
         
         buttons = [
-            [InlineKeyboardButton(text="📅 Забрать ежедневный", callback_data="claim_daily")],
             [InlineKeyboardButton(text="💧 Забрать с крана", callback_data="claim_faucet")],
             [InlineKeyboardButton(text="🎫 Активировать код", callback_data="activate_bonus")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
@@ -1418,233 +1145,92 @@ class CasinoBot:
         
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     
-    async def claim_daily(self, callback: CallbackQuery):
+    async def claim_faucet(self, callback: CallbackQuery):
         user_id = callback.from_user.id
         
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            # Проверяем, получал ли сегодня
+            cursor = await db.execute('SELECT value FROM settings WHERE key = "faucet_cooldown"')
+            cooldown = int((await cursor.fetchone())[0])
+            
             cursor = await db.execute('''
-                SELECT last_claim, streak FROM daily_rewards WHERE user_id = ?
+                SELECT created_at FROM transactions 
+                WHERE user_id = ? AND type = 'faucet' 
+                ORDER BY created_at DESC LIMIT 1
             ''', (user_id,))
-            result = await cursor.fetchone()
+            last_faucet = await cursor.fetchone()
             
             now = datetime.now()
-            if result:
-                last_claim = datetime.fromisoformat(result[0])
-                streak = result[1]
-                
-                if last_claim.date() == now.date():
-                    await callback.answer("❌ Вы уже получали сегодняшний бонус", show_alert=True)
+            if last_faucet:
+                last_time = datetime.fromisoformat(last_faucet[0])
+                if (now - last_time).total_seconds() < cooldown:
+                    time_left = cooldown - (now - last_time).total_seconds()
+                    await callback.answer(f"❌ Подождите {int(time_left // 60)} мин", show_alert=True)
                     return
-                
-                # Проверяем, была ли вчера
-                if (now.date() - last_claim.date()).days == 1:
-                    streak += 1
-                else:
-                    streak = 1
-            else:
-                streak = 1
             
-            # Рассчитываем бонус
-            base_bonus = 100
-            bonus = base_bonus * (1 + (streak - 1) * 0.1)  # +10% за каждый день серии
+            cursor = await db.execute('SELECT value FROM settings WHERE key = "faucet_amount"')
+            amount = int((await cursor.fetchone())[0])
             
-            # Обновляем баланс
-            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (bonus, user_id))
-            
-            # Обновляем daily rewards
+            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
             await db.execute('''
-                INSERT INTO daily_rewards (user_id, last_claim, streak)
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    last_claim = ?,
-                    streak = ?
-            ''', (user_id, now, streak, now, streak))
+                INSERT INTO transactions (transaction_id, user_id, amount, type, status, description)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (str(uuid.uuid4()), user_id, amount, 'faucet', 'completed', 'Кран'))
             
             await db.commit()
         
-        await callback.answer(f"✅ Получено {bonus:.0f} ⭐!", show_alert=True)
+        await callback.answer(f"✅ Получено {amount} ⭐!", show_alert=True)
         await self.show_bonuses(callback)
     
-    # Реферальная система
     async def show_referrals(self, callback: CallbackQuery):
         user_id = callback.from_user.id
         user = await Database.get_user(user_id)
         
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            cursor = await db.execute('''
-                SELECT COUNT(*), SUM(total_bets) FROM users WHERE referred_by = ?
-            ''', (user_id,))
-            referrals_count, referrals_bets = await cursor.fetchone()
+            cursor = await db.execute('SELECT COUNT(*) FROM users WHERE referred_by = ?', (user_id,))
+            referrals_count = (await cursor.fetchone())[0]
         
         text = (
             f"👥 **Реферальная программа**\n\n"
             f"Ваша реферальная ссылка:\n"
             f"`https://t.me/{(await bot.me()).username}?start={user['referral_code']}`\n\n"
             f"Приглашено друзей: **{referrals_count or 0}**\n"
-            f"Суммарные ставки рефералов: **{referrals_bets or 0} ⭐**\n"
-            f"Заработано: **{(referrals_bets or 0) * 0.05:.0f} ⭐** (5% от ставок)\n\n"
-            f"За каждого приглашенного друга вы получаете **50 ⭐** бонуса!"
+            f"За каждого друга вы получаете **50 ⭐** бонуса!"
         )
         
         buttons = [
-            [InlineKeyboardButton(text="📊 Статистика рефералов", callback_data="referral_stats")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
         ]
         
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     
-    # Callback обработчик
-    async def callback_handler(self, callback: CallbackQuery, state: FSMContext):
-        data = callback.data
-        
-        # Главное меню
-        if data == "main_menu":
-            user_id = callback.from_user.id
-            user = await Database.get_user(user_id)
-            await callback.message.edit_text(
-                "🎰 **Главное меню**\n\nВыберите игру:",
-                reply_markup=self.get_main_keyboard(user_id, user.get('is_admin', 0))
-            )
-        
-        # Баланс и транзакции
-        elif data == "balance":
-            await self.cmd_balance(callback.message)
-        elif data == "deposit":
-            await self.process_deposit(callback)
-        elif data == "withdraw":
-            await self.process_withdraw(callback, state)
-        
-        # Игры
-        elif data.startswith("game_"):
-            game_type = data.replace("game_", "")
-            await callback.message.edit_text(
-                f"Выберите ставку для игры:",
-                reply_markup=self.get_game_keyboard(game_type)
-            )
-        
-        elif data.startswith("play_"):
-            parts = data.split("_")
-            game_type = parts[1]
-            bet = int(parts[2])
-            await self.play_game(callback, game_type, bet)
-        
-        elif data.startswith("custom_bet_"):
-            game_type = data.replace("custom_bet_", "")
-            await state.set_state(BetStates.waiting_for_bet)
-            await state.update_data(game_type=game_type)
-            await callback.message.edit_text(
-                f"Введите сумму ставки (от {MIN_BET} до {MAX_BET}):",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="❌ Отмена", callback_data=f"game_{game_type}")]
-                ])
-            )
-        
-        # Админ панель
-        elif data == "admin_panel":
-            await self.admin_panel(callback)
-        elif data == "admin_rtp":
-            await self.admin_manage_rtp(callback)
-        elif data == "admin_broadcast":
-            await self.admin_broadcast(callback, state)
-        elif data.startswith("admin_rtp_"):
-            game_type = data.replace("admin_rtp_", "")
-            await state.set_state(BetStates.waiting_for_rtp_change)
-            await state.update_data(game_type=game_type)
-            await callback.message.edit_text(
-                f"Введите новое значение RTP для {game_type} (70-85%):",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_rtp")]
-                ])
-            )
-        
-        # Турниры
-        elif data == "tournaments":
-            await self.show_tournaments(callback)
-        
-        # Бонусы
-        elif data == "bonuses":
-            await self.show_bonuses(callback)
-        elif data == "claim_daily":
-            await self.claim_daily(callback)
-        elif data == "claim_faucet":
-            await self.claim_faucet(callback)
-        elif data == "activate_bonus":
-            await state.set_state(BetStates.waiting_for_bonus_code)
-            await callback.message.edit_text(
-                "Введите бонус код:",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="❌ Отмена", callback_data="bonuses")]
-                ])
-            )
-        
-        # Рефералы
-        elif data == "referrals":
-            await self.show_referrals(callback)
-        
-        # Статистика
-        elif data == "stats":
-            await self.show_stats(callback)
-        
-        # Настройки
-        elif data == "settings":
-            await self.show_settings(callback, state)
-        
-        await callback.answer()
-    
-    # Дополнительные функции
     async def show_stats(self, callback: CallbackQuery):
         user_id = callback.from_user.id
         
-        # Получаем топ игроков
-        top_players = await Database.get_top_players(10)
+        top_players = await Database.get_top_players(5)
         
-        # Получаем статистику пользователя
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cursor = await db.execute('''
-                SELECT 
-                    COUNT(*) as total_games,
-                    SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END) as wins,
-                    SUM(CASE WHEN profit < 0 THEN 1 ELSE 0 END) as losses,
-                    SUM(profit) as total_profit,
-                    MAX(profit) as biggest_win,
-                    MIN(profit) as biggest_loss
-                FROM games 
-                WHERE user_id = ?
+                SELECT COUNT(*), SUM(profit) FROM games WHERE user_id = ?
             ''', (user_id,))
-            user_stats = await cursor.fetchone()
+            games_count, total_profit = await cursor.fetchone()
         
         stats_text = "📊 **Статистика**\n\n"
         
-        if user_stats and user_stats[0]:
-            total_games, wins, losses, profit, biggest_win, biggest_loss = user_stats
-            win_rate = (wins / total_games * 100) if total_games > 0 else 0
-            
-            stats_text += (
-                f"**Ваша статистика:**\n"
-                f"Всего игр: {total_games}\n"
-                f"Побед: {wins}\n"
-                f"Поражений: {losses}\n"
-                f"Винрейт: {win_rate:.1f}%\n"
-                f"Общий профит: {profit or 0} ⭐\n"
-                f"Макс выигрыш: {biggest_win or 0} ⭐\n"
-                f"Макс проигрыш: {abs(biggest_loss or 0)} ⭐\n\n"
-            )
-        else:
-            stats_text += "У вас пока нет сыгранных игр.\n\n"
+        stats_text += f"**Ваша статистика:**\n"
+        stats_text += f"Всего игр: {games_count or 0}\n"
+        stats_text += f"Общий профит: {total_profit or 0} ⭐\n\n"
         
-        stats_text += "**Топ-10 игроков:**\n"
+        stats_text += "**Топ-5 игроков:**\n"
         for i, player in enumerate(top_players, 1):
-            stats_text += f"{i}. {player['username'] or f'ID{player['user_id']}'}: {player['total_wins']} побед ({player['win_rate']:.1f}%)\n"
+            stats_text += f"{i}. {player['username'] or f'ID{player['user_id']}'}: {player['total_wins']} побед\n"
         
         buttons = [
-            [InlineKeyboardButton(text="📈 Детальная статистика по играм", callback_data="game_stats")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
         ]
         
         await callback.message.edit_text(stats_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     
-    async def show_settings(self, callback: CallbackQuery, state: FSMContext):
+    async def show_settings(self, callback: CallbackQuery):
         user_id = callback.from_user.id
         user = await Database.get_user(user_id)
         
@@ -1657,226 +1243,177 @@ class CasinoBot:
         
         buttons = [
             [InlineKeyboardButton(text="🌐 Сменить язык", callback_data="change_language")],
-            [InlineKeyboardButton(text="🔔 Уведомления", callback_data="toggle_notifications")],
             [InlineKeyboardButton(text="🔐 Provably Fair", callback_data="provably_fair_info")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
         ]
         
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     
-    async def claim_faucet(self, callback: CallbackQuery):
-        user_id = callback.from_user.id
+    async def callback_handler(self, callback: CallbackQuery, state: FSMContext):
+        data = callback.data
         
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            # Проверяем время последнего получения
-            cursor = await db.execute('''
-                SELECT created_at FROM transactions 
-                WHERE user_id = ? AND type = 'faucet' 
-                ORDER BY created_at DESC LIMIT 1
-            ''', (user_id,))
-            last_faucet = await cursor.fetchone()
-            
-            cursor = await db.execute('SELECT value FROM settings WHERE key = "faucet_cooldown"')
-            cooldown = int((await cursor.fetchone())[0])
-            
-            now = datetime.now()
-            if last_faucet:
-                last_time = datetime.fromisoformat(last_faucet[0])
-                if (now - last_time).total_seconds() < cooldown:
-                    time_left = cooldown - (now - last_time).total_seconds()
-                    await callback.answer(f"❌ Подождите {int(time_left // 60)} мин", show_alert=True)
-                    return
-            
-            # Получаем сумму
-            cursor = await db.execute('SELECT value FROM settings WHERE key = "faucet_amount"')
-            amount = int((await cursor.fetchone())[0])
-            
-            # Начисляем
-            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
-            
-            # Записываем транзакцию
-            await db.execute('''
-                INSERT INTO transactions (transaction_id, user_id, amount, type, status, description)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (str(uuid.uuid4()), user_id, amount, 'faucet', 'completed', 'Кран'))
-            
-            await db.commit()
-        
-        await callback.answer(f"✅ Получено {amount} ⭐!", show_alert=True)
-        await self.show_bonuses(callback)
-    
-    # Обработчики сообщений
-    async def handle_message(self, message: Message, state: FSMContext):
-        user_id = message.from_user.id
-        current_state = await state.get_state()
-        
-        if current_state == BetStates.waiting_for_bet.state:
-            try:
-                bet = int(message.text)
-                if bet < MIN_BET or bet > MAX_BET:
-                    await message.answer(f"❌ Ставка должна быть от {MIN_BET} до {MAX_BET}")
-                    return
-                
-                data = await state.get_data()
-                game_type = data.get('game_type')
-                await state.clear()
-                
-                # Проверяем баланс
-                user = await Database.get_user(user_id)
-                if user['balance'] < bet:
-                    await message.answer("❌ Недостаточно средств")
-                    return
-                
-                # Запускаем игру
-                await self.play_game(
-                    CallbackQuery(id='', from_user=message.from_user, message=message, data=f'play_{game_type}_{bet}'),
-                    game_type,
-                    bet
+        if data == "main_menu":
+            await callback.message.edit_text(
+                "🎰 **Главное меню**\n\nВыберите игру:",
+                reply_markup=self.get_main_keyboard(callback.from_user.id)
+            )
+        elif data == "balance":
+            await self.cmd_balance(callback.message)
+        elif data == "deposit":
+            await callback.message.edit_text(
+                "💳 **Пополнение баланса**\n\nФункция в разработке",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                ])
+            )
+        elif data.startswith("game_"):
+            game_type = data.replace("game_", "")
+            if game_type in self.games:
+                await callback.message.edit_text(
+                    f"Выберите ставку:",
+                    reply_markup=self.get_game_keyboard(game_type)
                 )
-            except ValueError:
-                await message.answer("❌ Введите число")
-        
-        elif current_state == BetStates.waiting_for_withdrawal.state:
+            else:
+                await callback.answer(f"❌ Игра временно недоступна", show_alert=True)
+        elif data.startswith("play_"):
+            parts = data.split("_")
+            if len(parts) < 3:
+                await callback.answer("❌ Неверный формат", show_alert=True)
+                return
+            game_type = parts[1]
             try:
-                amount = int(message.text)
-                user = await Database.get_user(user_id)
-                
-                if amount < 100:
-                    await message.answer("❌ Минимальная сумма вывода 100 ⭐")
-                    return
-                
-                if amount > user['balance']:
-                    await message.answer("❌ Недостаточно средств")
-                    return
-                
-                if amount > 50000:
-                    await message.answer("❌ Максимальная сумма вывода 50000 ⭐")
-                    return
-                
-                # Создаем запрос на вывод
-                async with aiosqlite.connect(DATABASE_PATH) as db:
-                    transaction_id = str(uuid.uuid4())
-                    await db.execute('''
-                        INSERT INTO transactions (transaction_id, user_id, amount, type, status, description)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (transaction_id, user_id, amount, 'withdrawal', 'pending', f'Вывод {amount} ⭐'))
-                    
-                    # Блокируем средства
-                    await db.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', (amount, user_id))
-                    
-                    await db.commit()
-                
-                await state.clear()
-                await message.answer(
-                    f"✅ Заявка на вывод {amount} ⭐ создана!\n"
-                    f"Ожидайте подтверждения администратора."
-                )
-                
-                # Уведомляем админов
-                for admin_id in ADMIN_IDS:
-                    try:
-                        await bot.send_message(
-                            admin_id,
-                            f"💰 Новая заявка на вывод!\n"
-                            f"Пользователь: {user_id}\n"
-                            f"Сумма: {amount} ⭐\n"
-                            f"ID транзакции: `{transaction_id}`"
-                        )
-                    except:
-                        pass
-                
+                bet = int(parts[2])
             except ValueError:
-                await message.answer("❌ Введите число")
-        
-        elif current_state == BetStates.waiting_for_admin_action.state:
-            data = await state.get_data()
-            action = data.get('admin_action')
-            
-            if action == "broadcast":
-                # Рассылка сообщения
-                async with aiosqlite.connect(DATABASE_PATH) as db:
-                    cursor = await db.execute('SELECT user_id FROM users')
-                    users = await cursor.fetchall()
-                
-                success = 0
-                failed = 0
-                
-                for (uid,) in users:
-                    try:
-                        await bot.send_message(uid, message.text)
-                        success += 1
-                        await asyncio.sleep(0.05)  # Чтобы не флудить
-                    except:
-                        failed += 1
-                
-                await message.answer(
-                    f"✅ Рассылка завершена!\n"
-                    f"Успешно: {success}\n"
-                    f"Ошибок: {failed}"
+                await callback.answer("❌ Неверная сумма", show_alert=True)
+                return
+            await self.play_game(callback, game_type, bet)
+        elif data.startswith("custom_bet_"):
+            game_type = data.replace("custom_bet_", "")
+            await state.set_state(BetStates.waiting_for_bet)
+            await state.update_data(game_type=game_type)
+            await callback.message.edit_text(
+                f"Введите сумму ставки (от {MIN_BET} до {MAX_BET}):",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data=f"game_{game_type}")]
+                ])
+            )
+        elif data.startswith("roulette_"):
+            bet_type = data.replace("roulette_", "")
+            await state.set_state(BetStates.waiting_for_bet)
+            await state.update_data(game_type="roulette", bet_type=bet_type)
+            await callback.message.edit_text(
+                f"Введите сумму ставки для {bet_type}:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data="game_roulette")]
+                ])
+            )
+        elif data.startswith("plinko_"):
+            risk = data.replace("plinko_", "")
+            await state.set_state(BetStates.waiting_for_bet)
+            await state.update_data(game_type="plinko", risk=risk)
+            await callback.message.edit_text(
+                f"Введите сумму ставки для Plinko ({risk} риск):",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data="game_plinko")]
+                ])
+            )
+        elif data.startswith("mines_"):
+            if data == "mines_bet":
+                await state.set_state(BetStates.waiting_for_bet)
+                await state.update_data(game_type="mines")
+                await callback.message.edit_text(
+                    f"Введите сумму ставки для Mines:",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="❌ Отмена", callback_data="game_mines")]
+                    ])
                 )
-                await state.clear()
-        
-        elif current_state == BetStates.waiting_for_rtp_change.state:
-            try:
-                new_rtp = float(message.text)
-                if new_rtp < 70 or new_rtp > 85:
-                    await message.answer("❌ RTP должен быть от 70% до 85%")
-                    return
-                
-                data = await state.get_data()
-                game_type = data.get('game_type')
-                
-                await Database.update_rtp_settings(game_type, new_rtp, user_id)
-                await state.clear()
-                
-                await message.answer(f"✅ RTP для {game_type} изменен на {new_rtp}%")
-                
-            except ValueError:
-                await message.answer("❌ Введите число")
-        
-        elif current_state == BetStates.waiting_for_bonus_code.state:
-            code = message.text.upper()
-            
+            else:
+                try:
+                    mines_count = int(data.replace("mines_", ""))
+                    await state.set_state(BetStates.waiting_for_bet)
+                    await state.update_data(game_type="mines", mines_count=mines_count)
+                    await callback.message.edit_text(
+                        f"Введите сумму ставки для Mines ({mines_count} мин):",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="❌ Отмена", callback_data="game_mines")]
+                        ])
+                    )
+                except ValueError:
+                    await callback.answer("❌ Неверный формат", show_alert=True)
+        elif data == "tournaments":
+            await self.show_tournaments(callback)
+        elif data == "bonuses":
+            await self.show_bonuses(callback)
+        elif data == "claim_faucet":
+            await self.claim_faucet(callback)
+        elif data == "activate_bonus":
+            await state.set_state(BetStates.waiting_for_bonus_code)
+            await callback.message.edit_text(
+                "Введите бонус код:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data="bonuses")]
+                ])
+            )
+        elif data == "referrals":
+            await self.show_referrals(callback)
+        elif data == "stats":
+            await self.show_stats(callback)
+        elif data == "settings":
+            await self.show_settings(callback)
+        elif data == "admin_panel":
+            await self.admin_panel(callback)
+        elif data == "admin_stats":
+            if callback.from_user.id not in ADMIN_IDS:
+                return
             async with aiosqlite.connect(DATABASE_PATH) as db:
-                # Проверяем код
-                cursor = await db.execute('''
-                    SELECT * FROM bonus_codes 
-                    WHERE code = ? AND used_count < max_uses 
-                    AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-                ''', (code,))
-                bonus = await cursor.fetchone()
-                
-                if not bonus:
-                    await message.answer("❌ Недействительный бонус код")
-                    return
-                
-                # Проверяем, не использовал ли пользователь уже
-                cursor = await db.execute('''
-                    SELECT * FROM bonus_uses WHERE code = ? AND user_id = ?
-                ''', (code, user_id))
-                if await cursor.fetchone():
-                    await message.answer("❌ Вы уже использовали этот код")
-                    return
-                
-                # Начисляем бонус
-                amount = bonus[1]
-                await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
-                
-                # Обновляем счетчик использований
-                await db.execute('UPDATE bonus_codes SET used_count = used_count + 1 WHERE code = ?', (code,))
-                
-                # Записываем использование
-                await db.execute('INSERT INTO bonus_uses (code, user_id) VALUES (?, ?)', (code, user_id))
-                
-                await db.commit()
-            
-            await state.clear()
-            await message.answer(f"✅ Бонус активирован! Получено {amount} ⭐")
+                cursor = await db.execute('SELECT COUNT(*) FROM users')
+                users_count = (await cursor.fetchone())[0]
+                cursor = await db.execute('SELECT SUM(profit) FROM games')
+                total_profit = (await cursor.fetchone())[0] or 0
+            jackpot = await Database.get_jackpot()
+            await callback.message.edit_text(
+                f"📊 **Статистика бота**\n\n"
+                f"Пользователей: **{users_count}**\n"
+                f"Общий профит: **{total_profit} ⭐**\n"
+                f"Джекпот: **{jackpot} ⭐**",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]
+                ])
+            )
+        elif data == "admin_rtp":
+            if callback.from_user.id not in ADMIN_IDS:
+                return
+            text = "🎮 **Управление RTP**\n\n"
+            buttons = []
+            for game_type in self.games.keys():
+                game_names = {
+                    "slot": "🎰 Слоты", "dice": "🎲 Кости", "roulette": "🎡 Рулетка",
+                    "blackjack": "🃏 Блэкджек", "plinko": "📌 Plinko", "mines": "💣 Mines"
+                }
+                buttons.append([InlineKeyboardButton(
+                    text=f"Изменить {game_names[game_type]}",
+                    callback_data=f"admin_rtp_{game_type}"
+                )])
+            buttons.append([InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")])
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        elif data.startswith("admin_rtp_"):
+            if callback.from_user.id not in ADMIN_IDS:
+                return
+            game_type = data.replace("admin_rtp_", "")
+            await state.set_state(BetStates.waiting_for_rtp_change)
+            await state.update_data(game_type=game_type)
+            await callback.message.edit_text(
+                f"Введите новое значение RTP для {game_type} (70-85%):",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_rtp")]
+                ])
+            )
+        
+        await callback.answer()
 
-# Создаем экземпляр бота
-casino_bot = CasinoBot()
-
-# Регистрируем обработчики
+# ============================================
+# ОБРАБОТЧИКИ СООБЩЕНИЙ
+# ============================================
 @dp.message(CommandStart())
 async def start_command(message: Message):
     await casino_bot.cmd_start(message)
@@ -1889,76 +1426,135 @@ async def balance_command(message: Message):
 async def callback_handler(callback: CallbackQuery, state: FSMContext):
     await casino_bot.callback_handler(callback, state)
 
-@dp.message()
-async def message_handler(message: Message, state: FSMContext):
-    await casino_bot.handle_message(message, state)
+@dp.message(BetStates.waiting_for_bet)
+async def handle_custom_bet(message: Message, state: FSMContext):
+    try:
+        bet = int(message.text)
+        if bet < MIN_BET or bet > MAX_BET:
+            await message.answer(f"❌ Ставка должна быть от {MIN_BET} до {MAX_BET}")
+            return
+        
+        data = await state.get_data()
+        game_type = data.get('game_type')
+        bet_type = data.get('bet_type')
+        risk = data.get('risk')
+        mines_count = data.get('mines_count')
+        await state.clear()
+        
+        user = await Database.get_user(message.from_user.id)
+        if not user:
+            await message.answer("❌ Пользователь не найден. Напишите /start")
+            return
+        
+        if user['balance'] < bet:
+            await message.answer("❌ Недостаточно средств")
+            return
+        
+        kwargs = {}
+        if bet_type:
+            kwargs["bet_type"] = bet_type
+        if risk:
+            kwargs["risk"] = risk
+        if mines_count:
+            kwargs["mines_count"] = mines_count
+        
+        await casino_bot.play_game(
+            CallbackQuery(
+                id='',
+                from_user=message.from_user,
+                message=message,
+                data=f'play_{game_type}_{bet}'
+            ),
+            game_type,
+            bet,
+            **kwargs
+        )
+    except ValueError:
+        await message.answer("❌ Введите число")
 
-@dp.pre_checkout_query()
-async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-
-@dp.message(F.successful_payment)
-async def successful_payment_handler(message: Message):
-    user_id = message.from_user.id
-    amount = message.successful_payment.total_amount
+@dp.message(BetStates.waiting_for_bonus_code)
+async def handle_bonus_code(message: Message, state: FSMContext):
+    code = message.text.upper()
     
-    # Обновляем баланс
-    await Database.update_balance(user_id, amount)
-    
-    # Записываем транзакцию
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute('''
-            INSERT INTO transactions (transaction_id, user_id, amount, type, status, telegram_payment_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (str(uuid.uuid4()), user_id, amount, 'deposit', 'completed', message.successful_payment.telegram_payment_charge_id))
+        cursor = await db.execute('''
+            SELECT * FROM bonus_codes 
+            WHERE code = ? AND used_count < max_uses 
+            AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+        ''', (code,))
+        bonus = await cursor.fetchone()
+        
+        if not bonus:
+            await message.answer("❌ Недействительный бонус код")
+            await state.clear()
+            return
+        
+        cursor = await db.execute('''
+            SELECT * FROM bonus_uses WHERE code = ? AND user_id = ?
+        ''', (code, message.from_user.id))
+        if await cursor.fetchone():
+            await message.answer("❌ Вы уже использовали этот код")
+            await state.clear()
+            return
+        
+        amount = bonus[1]
+        await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, message.from_user.id))
+        await db.execute('UPDATE bonus_codes SET used_count = used_count + 1 WHERE code = ?', (code,))
+        await db.execute('INSERT INTO bonus_uses (code, user_id) VALUES (?, ?)', (code, message.from_user.id))
+        
         await db.commit()
     
-    await message.answer(f"✅ Баланс пополнен на {amount} ⭐!")
+    await state.clear()
+    await message.answer(f"✅ Бонус активирован! Получено {amount} ⭐")
 
-# Функция для периодического бэкапа
-async def backup_database():
-    while True:
-        await asyncio.sleep(21600)  # 6 часов
-        if os.path.exists('/tmp'):
-            backup_path = f'/tmp/casino_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
-            if os.path.exists(DATABASE_PATH):
-                import shutil
-                shutil.copy2(DATABASE_PATH, backup_path)
-                logger.info(f"Бэкап создан: {backup_path}")
+@dp.message(BetStates.waiting_for_rtp_change)
+async def handle_rtp_change(message: Message, state: FSMContext):
+    try:
+        new_rtp = float(message.text)
+        if new_rtp < 70 or new_rtp > 85:
+            await message.answer("❌ RTP должен быть от 70% до 85%")
+            return
+        
+        data = await state.get_data()
+        game_type = data.get('game_type')
+        
+        await Database.update_rtp_settings(game_type, new_rtp, message.from_user.id)
+        await state.clear()
+        
+        await message.answer(f"✅ RTP для {game_type} изменен на {new_rtp}%")
+    except ValueError:
+        await message.answer("❌ Введите число")
 
-
-# --- Добавляем функцию для запуска HTTP-сервера ---
+# ============================================
+# HTTP-СЕРВЕР ДЛЯ RENDER
+# ============================================
 async def run_http_server():
-    """Запускает минимальный HTTP-сервер для проверки порта Render."""
     app = web.Application()
     
     async def handle(request):
         return web.Response(text="Bot is running!")
 
     app.router.add_get('/', handle)
-    app.router.add_get('/health', handle)  # Стандартный путь для проверки здоровья
+    app.router.add_get('/health', handle)
     
     port = int(os.getenv('PORT', 10000))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    logger.info(f"✅ HTTP-сервер для проверки Render запущен на порту {port}")
+    logger.info(f"✅ HTTP-сервер для Render запущен на порту {port}")
 
-# --- Изменяем функцию main (вашу существующую) ---
+# ============================================
+# ЗАПУСК БОТА
+# ============================================
 async def main():
-    # Запускаем HTTP-сервер в фоне
-    asyncio.create_task(run_http_server())
-    
-    # Инициализируем базу данных
     await init_db()
-    
-    # Запускаем задачу бэкапа
-    asyncio.create_task(backup_database())
-    
-    # Запускаем бота (как и раньше)
-    logger.info("✅ Бот запущен и готов к работе!")
+    asyncio.create_task(run_http_server())
+    logger.info("🚀 Бот запускается...")
     await dp.start_polling(bot)
+
+# Создаем экземпляр бота
+casino_bot = CasinoBot()
 
 if __name__ == "__main__":
     asyncio.run(main())
