@@ -1,5 +1,7 @@
-import asyncio
+import os
+import sys
 import logging
+import asyncio
 import random
 import string
 import json
@@ -14,78 +16,87 @@ from decimal import Decimal, ROUND_HALF_UP
 from collections import defaultdict
 import math
 from enum import Enum
-import os
-import signal
-import sys
 
+import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    ChatMemberUpdated, ChatMember, LabeledPrice, PreCheckoutQuery,
-    ShippingQuery, SuccessfulPayment
+    LabeledPrice, PreCheckoutQuery
 )
-from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter
-from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, IS_MEMBER, IS_NOT_MEMBER
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.exceptions import TelegramBadRequest
-import aiosqlite
-import matplotlib.pyplot as plt
-import io
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения
-# ВРЕМЕННО: для отладки
-print("=== DEBUG INFO ===")
-print(f"BOT_TOKEN exists: {'Yes' if os.getenv('BOT_TOKEN') else 'No'}")
-print(f"BOT_TOKEN length: {len(os.getenv('BOT_TOKEN', '')) if os.getenv('BOT_TOKEN') else 0}")
-print(f"ADMIN_IDS: {os.getenv('ADMIN_IDS')}")
-print("==================")
+load_dotenv()
+
+# ========== ДИАГНОСТИКА ==========
+print("\n" + "="*50)
+print("🔍 ДИАГНОСТИКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ")
+print("="*50)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_IDS_STR = os.getenv('ADMIN_IDS')
+
+print(f"BOT_TOKEN exists: {'✅' if BOT_TOKEN else '❌'}")
+if BOT_TOKEN:
+    print(f"BOT_TOKEN length: {len(BOT_TOKEN)}")
+    print(f"BOT_TOKEN starts with: {BOT_TOKEN[:10]}...")
+else:
+    print("❌ BOT_TOKEN не найден!")
+
+print(f"ADMIN_IDS: {ADMIN_IDS_STR if ADMIN_IDS_STR else '❌ не найден'}")
+print("="*50 + "\n")
+
+# Проверяем токен (ОДНА проверка)
 if not BOT_TOKEN:
-    # ВРЕМЕННО: для теста можно захардкодить (НО ПОТОМ УДАЛИТЬ!)
-    # BOT_TOKEN = "НОВЫЙ_ТОКЕН_СЮДА"
-    # print("⚠️ Использую захардкоженный токен для теста!")
-    # else:
-    raise ValueError("BOT_TOKEN не найден в переменных окружения!")
+    print("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не найден!")
+    print("Убедитесь, что переменная BOT_TOKEN задана в Environment на Render")
+    sys.exit(1)
+
+# Проверяем ADMIN_IDS
+if not ADMIN_IDS_STR:
+    print("⚠️ ВНИМАНИЕ: ADMIN_IDS не найден, будет использован пустой список")
+    ADMIN_IDS = []
+else:
+    try:
+        ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_STR.split(',')]
+        print(f"✅ Загружены ADMIN_IDS: {ADMIN_IDS}")
+    except:
+        print(f"❌ Ошибка при парсинге ADMIN_IDS: {ADMIN_IDS_STR}")
+        ADMIN_IDS = []
+
 # Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 logger = logging.getLogger(__name__)
 
-# Обработка сигналов для Render
-def signal_handler(sig, frame):
-    logger.info('Остановка бота...')
-    sys.exit(0)
+print("✅ Токен успешно загружен, продолжаем запуск...")
 
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-# Конфигурация из переменных окружения
-BOT_TOKEN = os.getenv('8637433233:AAEhCu4XR7ovs1XIZmk3uRy_h6YzHN-gDmA')
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не найден в переменных окружения!")
-
-# ID администраторов (можно добавить несколько через запятую)
-ADMIN_IDS = [int(id.strip()) for id in os.getenv('ADMIN_IDS', '1553865459').split(',')]
-
-# Настройки базы данных
+# Конфигурация
 DATABASE_PATH = os.getenv('DATABASE_PATH', 'casino_bot.db')
-STAR_RATE = 1.0  # 1 звезда = 1 единица валюты
+RTP_DISPLAY = 98.2
+RTP_ACTUAL = 76.82
+JACKPOT_PERCENT = 0.05
+MAX_BET = 1000000
+MIN_BET = 1
 
-# Константы
-RTP_DISPLAY = 98.2  # Отображаемый RTP
-RTP_ACTUAL = 76.82  # Реальный RTP
-JACKPOT_PERCENT = 0.05  # 5% от каждой ставки идет в джекпот
-MAX_BET = 1000000  # Максимальная ставка
-MIN_BET = 1  # Минимальная ставка
-
-# Инициализация бота и диспетчера
+# Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
+# ========== ОСТАЛЬНОЙ КОД ВАШЕГО БОТА ==========
+# (весь остальной код из вашего bot.py вставьте сюда)
+# Начиная с класса GameType и до конца файла
 
 # Классы для игр
 class GameType(Enum):
