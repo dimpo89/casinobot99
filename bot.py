@@ -29,6 +29,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
+import aiohttp
+from aiohttp import web
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -1924,16 +1926,38 @@ async def backup_database():
                 shutil.copy2(DATABASE_PATH, backup_path)
                 logger.info(f"Бэкап создан: {backup_path}")
 
-# Запуск бота
+
+# --- Добавляем функцию для запуска HTTP-сервера ---
+async def run_http_server():
+    """Запускает минимальный HTTP-сервер для проверки порта Render."""
+    app = web.Application()
+    
+    async def handle(request):
+        return web.Response(text="Bot is running!")
+
+    app.router.add_get('/', handle)
+    app.router.add_get('/health', handle)  # Стандартный путь для проверки здоровья
+    
+    port = int(os.getenv('PORT', 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"✅ HTTP-сервер для проверки Render запущен на порту {port}")
+
+# --- Изменяем функцию main (вашу существующую) ---
 async def main():
+    # Запускаем HTTP-сервер в фоне
+    asyncio.create_task(run_http_server())
+    
     # Инициализируем базу данных
     await init_db()
     
     # Запускаем задачу бэкапа
     asyncio.create_task(backup_database())
     
-    # Запускаем бота
-    logger.info("Бот запущен!")
+    # Запускаем бота (как и раньше)
+    logger.info("✅ Бот запущен и готов к работе!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
