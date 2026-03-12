@@ -1,5 +1,4 @@
-import secrets
-from typing import List, Dict
+from typing import Dict, List, Optional
 from .base_game import BaseGame, ProvablyFair
 
 class KenoGame(BaseGame):
@@ -27,15 +26,13 @@ class KenoGame(BaseGame):
 
     def generate_result(self, bet: int, user_id: int = None) -> Dict:
         server, client = ProvablyFair.generate_seeds()
-        nonce = secrets.randbelow(1000000)
-
+        nonce = ProvablyFair.get_random_number(server, 0, 1000000)
         nums = list(range(1,81))
         winning = []
         for i in range(20):
             seed = ProvablyFair.get_hash(server, client, nonce + i)
             idx = ProvablyFair.get_random_number(seed, 0, len(nums)-1)
             winning.append(nums.pop(idx))
-
         return {
             "winning": winning,
             "server_seed": server,
@@ -50,6 +47,5 @@ class KenoGame(BaseGame):
         cnt = len(picks)
         payouts = self.settings['payouts']
         if cnt in payouts and matches in payouts[cnt]:
-            mult = payouts[cnt][matches]
-            return bet * mult
+            return bet * payouts[cnt][matches]
         return 0
