@@ -12,6 +12,7 @@ class Database:
         self.db_path = db_path
 
     async def init_db(self):
+        """Создаёт все таблицы, если их нет, и заполняет настройки по умолчанию."""
         async with aiosqlite.connect(self.db_path) as db:
             # Таблица пользователей
             await db.execute('''
@@ -39,6 +40,7 @@ class Database:
                     pf_enabled INTEGER DEFAULT 1
                 )
             ''')
+            
             # Таблица транзакций
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS transactions (
@@ -54,7 +56,8 @@ class Database:
                     completed_at TIMESTAMP
                 )
             ''')
-            # Таблица игр
+            
+            # Таблица игр (история)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS games (
                     game_id TEXT PRIMARY KEY,
@@ -67,7 +70,8 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            # Таблица настроек RTP
+            
+            # Таблица настроек RTP для каждой игры
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS rtp_settings (
                     game_type TEXT PRIMARY KEY,
@@ -80,6 +84,7 @@ class Database:
                     modified_by INTEGER
                 )
             ''')
+            
             # Таблица джекпота
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS jackpot (
@@ -90,11 +95,14 @@ class Database:
                 )
             ''')
             await db.execute('INSERT OR IGNORE INTO jackpot (id, amount) VALUES (1, 1000)')
-            # Таблица бонусных кодов
+            
+            # Таблица бонусных кодов (расширенная)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS bonus_codes (
                     code TEXT PRIMARY KEY,
                     amount INTEGER,
+                    type TEXT DEFAULT 'deposit',  -- 'deposit', 'nodeposit', 'freespin'
+                    wager_multiplier INTEGER DEFAULT 35,
                     max_uses INTEGER,
                     used_count INTEGER DEFAULT 0,
                     expires_at TIMESTAMP,
@@ -102,6 +110,8 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # Таблица использованных бонусов
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS bonus_uses (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +120,8 @@ class Database:
                     used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            # Таблица турниров
+            
+            # Таблица турниров (упрощённо, можно удалить если не нужно)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS tournaments (
                     tournament_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,7 +145,8 @@ class Database:
                     PRIMARY KEY (tournament_id, user_id)
                 )
             ''')
-            # Таблица ежедневных наград
+            
+            # Таблица ежедневных наград (можно отключить)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS daily_rewards (
                     user_id INTEGER,
@@ -143,19 +155,22 @@ class Database:
                     PRIMARY KEY (user_id)
                 )
             ''')
-            # Таблица настроек казино
+            
+            # Таблица настроек казино (ключ-значение)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
             ''')
+            
+            # Настройки по умолчанию (без приветственного бонуса и ежедневного)
             default_settings = [
                 ('faucet_amount', '10'),
                 ('faucet_cooldown', '3600'),
                 ('min_withdrawal', '100'),
                 ('withdrawal_fee', '0'),
-                ('welcome_bonus', '100'),
+                ('welcome_bonus', '0'),          # отключено
                 ('referral_bonus', '50'),
                 ('maintenance_mode', 'false'),
                 ('wager_multiplier', '35'),
@@ -163,14 +178,25 @@ class Database:
             ]
             for key, value in default_settings:
                 await db.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', (key, value))
-            # Таблица настроек игр
+            
+            # Таблица настроек игр (JSON с символами, весами и т.п.)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS game_settings (
                     game_type TEXT PRIMARY KEY,
                     settings_json TEXT NOT NULL
                 )
             ''')
-            # Таблица магазина бонусов
+            
+            # Таблица для хранения временных данных открутки/подкрутки (tilt)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS tilt_settings (
+                    game_type TEXT PRIMARY KEY,
+                    tilt_factor REAL DEFAULT 1.0,
+                    until TIMESTAMP
+                )
+            ''')
+            
+            # Таблица для хранения настроек покупки бонусов (цена)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS bonus_shop (
                     game_type TEXT PRIMARY KEY,
@@ -178,7 +204,8 @@ class Database:
                     enabled INTEGER DEFAULT 1
                 )
             ''')
-            # Таблица для временных данных бонусных игр
+            
+            # Таблица для временных данных бонусных игр (sticky wild и т.п.)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS bonus_wilds (
                     user_id INTEGER,
@@ -190,7 +217,8 @@ class Database:
                     PRIMARY KEY (user_id, game_type)
                 )
             ''')
-            # Таблица для вейджера
+            
+            # Таблица для требований по вейджеру (отыгрыш бонуса)
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS wager_requirements (
                     wager_id TEXT PRIMARY KEY,
@@ -204,6 +232,7 @@ class Database:
                     completed_at TIMESTAMP
                 )
             ''')
+            
             # Таблица для сессий блэкджека
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS blackjack_sessions (
@@ -213,10 +242,11 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
             await db.commit()
         logger.info("База данных инициализирована")
 
-    # ----- Пользователи -----
+    # ---------- Пользователи ----------
     async def get_user(self, user_id: int) -> Optional[Dict]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -233,35 +263,49 @@ class Database:
 
     async def create_user(self, user_id: int, username: str = None, first_name: str = None,
                           last_name: str = None, referred_by: int = None) -> int:
+        """Создаёт нового пользователя или обновляет существующего. Приветственный бонус = 0."""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
             exists = await cursor.fetchone()
+            
             cursor = await db.execute('SELECT value FROM settings WHERE key = "welcome_bonus"')
-            welcome_bonus = int((await cursor.fetchone())[0])
+            welcome_bonus = int((await cursor.fetchone())[0])  # сейчас 0
+            
             cursor = await db.execute('SELECT value FROM settings WHERE key = "referral_bonus"')
             referral_bonus = int((await cursor.fetchone())[0])
+            
             if exists:
                 await db.execute('''
-                    UPDATE users SET username=?, first_name=?, last_name=?, last_active=CURRENT_TIMESTAMP
-                    WHERE user_id=?
+                    UPDATE users SET 
+                        username = ?,
+                        first_name = ?,
+                        last_name = ?,
+                        last_active = CURRENT_TIMESTAMP
+                    WHERE user_id = ?
                 ''', (username, first_name, last_name, user_id))
                 logger.info(f"Пользователь {user_id} обновлён")
                 bonus = 0
             else:
                 referral_code = self._generate_referral_code()
                 await db.execute('''
-                    INSERT INTO users (user_id, username, first_name, last_name, referral_code, referred_by, balance)
+                    INSERT INTO users 
+                    (user_id, username, first_name, last_name, referral_code, referred_by, balance)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''', (user_id, username, first_name, last_name, referral_code, referred_by, welcome_bonus))
                 logger.info(f"Новый пользователь {user_id} создан с балансом {welcome_bonus}")
                 bonus = welcome_bonus
+                
                 if referred_by:
-                    await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (referral_bonus, referred_by))
+                    await db.execute('''
+                        UPDATE users SET balance = balance + ? WHERE user_id = ?
+                    ''', (referral_bonus, referred_by))
                     await db.execute('''
                         INSERT INTO transactions (transaction_id, user_id, amount, type, status, description)
                         VALUES (?, ?, ?, ?, ?, ?)
                     ''', (str(uuid.uuid4()), referred_by, referral_bonus, 'referral', 'completed',
                           f'Реферальный бонус за пользователя {user_id}'))
+                    logger.info(f"Реферальный бонус {referral_bonus} начислен {referred_by}")
+            
             await db.commit()
             return bonus
 
@@ -270,6 +314,7 @@ class Database:
         return ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(length))
 
     async def update_balance(self, user_id: int, amount: int, description: str = "") -> bool:
+        """Изменяет реальный баланс пользователя. amount может быть отрицательным."""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
             row = await cursor.fetchone()
@@ -278,7 +323,8 @@ class Database:
             new_balance = row[0] + amount
             if new_balance < 0:
                 return False
-            await db.execute('UPDATE users SET balance = ?, last_active = CURRENT_TIMESTAMP WHERE user_id = ?', (new_balance, user_id))
+            await db.execute('UPDATE users SET balance = ?, last_active = CURRENT_TIMESTAMP WHERE user_id = ?',
+                             (new_balance, user_id))
             if description:
                 tx_type = 'admin' if amount > 0 else 'admin_withdraw'
                 await db.execute('''
@@ -298,8 +344,10 @@ class Database:
                 INSERT INTO games (game_id, user_id, game_type, bet_amount, win_amount, profit, game_data)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (game_id, user_id, game_type, bet_amount, win_amount, profit, json.dumps(game_data)))
+            # Обновляем статистику пользователя
             await db.execute('''
-                UPDATE users SET total_bets = total_bets + 1,
+                UPDATE users SET 
+                    total_bets = total_bets + 1,
                     total_wins = total_wins + ?,
                     total_losses = total_losses + ?,
                     biggest_win = MAX(biggest_win, ?),
@@ -312,17 +360,19 @@ class Database:
                   bet_amount if win_amount == 0 else 0,
                   user_id))
             await db.commit()
-            await self.update_tournament_scores(user_id, game_type, bet_amount, win_amount)
+            # Обновляем турниры (пока заглушка)
+            # await self.update_tournament_scores(user_id, game_type, bet_amount, win_amount)
 
     async def get_user_game_stats(self, user_id: int, game_type: str) -> Dict:
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
-                SELECT COUNT(*), SUM(win_amount) FROM games WHERE user_id = ? AND game_type = ?
+                SELECT COUNT(*), SUM(win_amount) FROM games
+                WHERE user_id = ? AND game_type = ?
             ''', (user_id, game_type))
             row = await cursor.fetchone()
             return {'total_bets': row[0] or 0, 'total_wins': row[1] or 0}
 
-    # ----- RTP настройки -----
+    # ---------- RTP настройки ----------
     async def get_rtp_settings(self, game_type: str = None) -> Dict:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -344,7 +394,7 @@ class Database:
             await db.commit()
             logger.info(f"RTP для {game_type} изменён на {new_rtp}% админом {admin_id}")
 
-    # ----- Джекпот -----
+    # ---------- Джекпот ----------
     async def update_jackpot(self, amount: int):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('UPDATE jackpot SET amount = amount + ? WHERE id = 1', (amount,))
@@ -365,12 +415,13 @@ class Database:
             await db.commit()
             logger.info(f"Джекпот сброшен победителем {winner_id}")
 
-    # ----- Админка -----
+    # ---------- Админка: пользователи ----------
     async def get_all_users(self, limit: int = 100, offset: int = 0) -> List[Dict]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute('''
-                SELECT user_id, username, balance, total_bets, total_wins, vip_level, join_date, is_banned
+                SELECT user_id, username, balance, total_bets, total_wins,
+                       vip_level, join_date, is_banned
                 FROM users ORDER BY join_date DESC LIMIT ? OFFSET ?
             ''', (limit, offset))
             rows = await cursor.fetchall()
@@ -393,7 +444,7 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    # ----- Транзакции -----
+    # ---------- Транзакции ----------
     async def add_transaction(self, user_id: int, amount: int, tx_type: str,
                               status: str, description: str, wallet_address: str = None) -> str:
         tx_id = str(uuid.uuid4())
@@ -426,16 +477,16 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    # ----- Бонус коды -----
-    async def create_bonus_code(self, code: str, amount: int, max_uses: int,
-                                 expires_at: datetime, created_by: int):
+    # ---------- Бонус коды (новые) ----------
+    async def create_bonus_code(self, code: str, amount: int, code_type: str, wager_mult: int,
+                                 max_uses: int, expires_at: datetime, created_by: int):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
-                INSERT INTO bonus_codes (code, amount, max_uses, expires_at, created_by)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (code, amount, max_uses, expires_at, created_by))
+                INSERT INTO bonus_codes (code, amount, type, wager_multiplier, max_uses, expires_at, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (code, amount, code_type, wager_mult, max_uses, expires_at, created_by))
             await db.commit()
-            logger.info(f"Бонус код {code} создан админом {created_by}")
+            logger.info(f"Бонус код {code} (тип {code_type}, вейджер {wager_mult}) создан админом {created_by}")
 
     async def get_bonus_codes(self) -> List[Dict]:
         async with aiosqlite.connect(self.db_path) as db:
@@ -444,7 +495,7 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def use_bonus_code(self, code: str, user_id: int) -> Optional[int]:
+    async def use_bonus_code(self, code: str, user_id: int) -> Optional[Dict]:
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('''
                 SELECT * FROM bonus_codes WHERE code = ? AND used_count < max_uses
@@ -453,21 +504,83 @@ class Database:
             row = await cursor.fetchone()
             if not row:
                 return None
+            # row: code, amount, type, wager_mult, max_uses, used_count, expires_at, created_by, created_at
             cursor = await db.execute('SELECT * FROM bonus_uses WHERE code = ? AND user_id = ?', (code, user_id))
             if await cursor.fetchone():
-                return -1
+                return None  # уже использовал
             amount = row[1]
-            await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
+            code_type = row[2]
+            wager_mult = row[3]
+            # Начисляем бонус в зависимости от типа
+            if code_type == 'deposit':
+                # на реальный баланс
+                await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
+                desc = f"Депозитный бонус код {code}"
+            elif code_type == 'nodeposit':
+                # на бонусный баланс с вейджером
+                await db.execute('UPDATE users SET bonus_balance = bonus_balance + ? WHERE user_id = ?', (amount, user_id))
+                # создаём требование вейджера
+                eligible = await self.get_setting('wager_games')
+                await self._add_wager_requirement_db(db, user_id, amount, wager_mult, eligible)
+                desc = f"Бездепозитный бонус код {code}"
+            elif code_type == 'freespin':
+                # фриспины можно начислять в отдельную таблицу, пока просто на баланс
+                await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
+                desc = f"Фриспин бонус код {code}"
+            else:
+                return None
             await db.execute('UPDATE bonus_codes SET used_count = used_count + 1 WHERE code = ?', (code,))
             await db.execute('INSERT INTO bonus_uses (code, user_id) VALUES (?, ?)', (code, user_id))
             await db.execute('''
                 INSERT INTO transactions (transaction_id, user_id, amount, type, status, description)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (str(uuid.uuid4()), user_id, amount, 'bonus', 'completed', f'Бонус код: {code}'))
+            ''', (str(uuid.uuid4()), user_id, amount, 'bonus', 'completed', desc))
             await db.commit()
-            return amount
+            return {'amount': amount, 'type': code_type, 'wager': wager_mult}
 
-    # ----- Турниры -----
+    # ---------- Вейджер (отыгрыш) ----------
+    async def add_wager_requirement(self, user_id: int, amount: int, wager_mult: int, eligible_games: str) -> str:
+        async with aiosqlite.connect(self.db_path) as db:
+            return await self._add_wager_requirement_db(db, user_id, amount, wager_mult, eligible_games)
+
+    async def _add_wager_requirement_db(self, db, user_id: int, amount: int, wager_mult: int, eligible_games: str) -> str:
+        total = amount * wager_mult
+        wager_id = str(uuid.uuid4())
+        await db.execute('''
+            INSERT INTO wager_requirements (wager_id, user_id, bonus_amount, total_to_wager, eligible_games)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (wager_id, user_id, amount, total, eligible_games))
+        return wager_id
+
+    async def get_active_wager(self, user_id: int) -> Optional[Dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('''
+                SELECT * FROM wager_requirements WHERE user_id = ? AND status = 'active' ORDER BY created_at LIMIT 1
+            ''', (user_id,))
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def update_wager_progress(self, wager_id: str, bet_amount: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE wager_requirements SET wagered_amount = wagered_amount + ?
+                WHERE wager_id = ? AND status = 'active'
+            ''', (bet_amount, wager_id))
+            cursor = await db.execute('SELECT wagered_amount, total_to_wager, user_id, bonus_amount FROM wager_requirements WHERE wager_id = ?', (wager_id,))
+            row = await cursor.fetchone()
+            if row and row[0] >= row[1]:
+                # Вейджер выполнен – переводим оставшийся бонус на реальный баланс
+                await db.execute("UPDATE wager_requirements SET status = 'completed', completed_at = ? WHERE wager_id = ?",
+                                 (datetime.now(), wager_id))
+                # Получаем текущий бонусный баланс
+                cursor2 = await db.execute('SELECT bonus_balance FROM users WHERE user_id = ?', (row[2],))
+                bonus_left = (await cursor2.fetchone())[0]
+                await db.execute('UPDATE users SET balance = balance + ?, bonus_balance = 0 WHERE user_id = ?',
+                                 (bonus_left, row[2]))
+            await db.commit()
+
+    # ---------- Турниры (упрощённо, можно не использовать) ----------
     async def create_tournament(self, name: str, prize_pool: int, game_type: str,
                                  duration_hours: int, min_bet: int, created_by: int) -> int:
         async with aiosqlite.connect(self.db_path) as db:
@@ -494,66 +607,12 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def get_all_tournaments(self) -> List[Dict]:
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('SELECT * FROM tournaments ORDER BY created_at DESC')
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def update_tournament_scores(self, user_id: int, game_type: str, bet: int, win: int):
-        # Заглушка, будет реализовано при необходимости
-        pass
-
-    async def get_tournament_leaderboard(self, tournament_id: int, limit: int = 10) -> List[Dict]:
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('''
-                SELECT tp.user_id, u.username, tp.score
-                FROM tournament_participants tp
-                JOIN users u ON tp.user_id = u.user_id
-                WHERE tp.tournament_id = ?
-                ORDER BY tp.score DESC LIMIT ?
-            ''', (tournament_id, limit))
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def end_tournament(self, tournament_id: int):
-        # Заглушка
-        pass
-
-    async def check_expired_tournaments(self):
-        # Заглушка
-        pass
-
-    # ----- Ежедневные награды -----
+    # ---------- Ежедневные награды (отключены) ----------
     async def get_daily_reward(self, user_id: int) -> Tuple[bool, int, int]:
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute('SELECT last_claim, streak FROM daily_rewards WHERE user_id = ?', (user_id,))
-            row = await cursor.fetchone()
-            now = datetime.now()
-            if row:
-                last_claim = datetime.fromisoformat(row[0])
-                streak = row[1]
-                if last_claim.date() == now.date():
-                    return False, streak, 0
-                if (now.date() - last_claim.date()).days == 1:
-                    streak += 1
-                else:
-                    streak = 1
-            else:
-                streak = 1
-            base_bonus = 100
-            bonus = int(base_bonus * (1 + (streak - 1) * 0.1))
-            await db.execute('''
-                INSERT INTO daily_rewards (user_id, last_claim, streak)
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET last_claim = ?, streak = ?
-            ''', (user_id, now, streak, now, streak))
-            await db.commit()
-            return True, streak, bonus
+        # Возвращаем False, чтобы бонус не начислялся
+        return False, 0, 0
 
-    # ----- Настройки казино -----
+    # ---------- Настройки казино ----------
     async def get_setting(self, key: str) -> str:
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT value FROM settings WHERE key = ?', (key,))
@@ -565,7 +624,7 @@ class Database:
             await db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
             await db.commit()
 
-    # ----- Настройки игр -----
+    # ---------- Настройки игр ----------
     async def get_game_settings(self, game_type: str) -> Dict:
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT settings_json FROM game_settings WHERE game_type = ?', (game_type,))
@@ -579,7 +638,7 @@ class Database:
             ''', (game_type, json.dumps(settings)))
             await db.commit()
 
-    # ----- Магазин бонусов -----
+    # ---------- Магазин бонусов (покупка бонусной игры) ----------
     async def get_bonus_price(self, game_type: str) -> int:
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute('SELECT price FROM bonus_shop WHERE game_type = ?', (game_type,))
@@ -593,7 +652,27 @@ class Database:
             ''', (game_type, price))
             await db.commit()
 
-    # ----- Временные данные бонусных игр -----
+    # ---------- Открутка/подкрутка (tilt) ----------
+    async def get_tilt(self, game_type: str) -> float:
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('SELECT tilt_factor, until FROM tilt_settings WHERE game_type = ?', (game_type,))
+            row = await cursor.fetchone()
+            if row and (row[1] is None or datetime.fromisoformat(row[1]) > datetime.now()):
+                return row[0]
+            return 1.0
+
+    async def set_tilt(self, game_type: str, factor: float, hours: int):
+        until = None
+        if hours > 0:
+            until = datetime.now() + timedelta(hours=hours)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT OR REPLACE INTO tilt_settings (game_type, tilt_factor, until)
+                VALUES (?, ?, ?)
+            ''', (game_type, factor, until))
+            await db.commit()
+
+    # ---------- Временные данные бонусных игр (для Dog House sticky wild) ----------
     async def get_bonus_wild(self, user_id: int, game_type: str) -> Dict:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -619,42 +698,7 @@ class Database:
             await db.execute('DELETE FROM bonus_wilds WHERE user_id = ? AND game_type = ?', (user_id, game_type))
             await db.commit()
 
-    # ----- Вейджер -----
-    async def add_wager_requirement(self, user_id: int, amount: int, eligible_games: str) -> str:
-        wager_mult = int(await self.get_setting('wager_multiplier') or 35)
-        total = amount * wager_mult
-        wager_id = str(uuid.uuid4())
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                INSERT INTO wager_requirements (wager_id, user_id, bonus_amount, total_to_wager, eligible_games)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (wager_id, user_id, amount, total, eligible_games))
-            await db.commit()
-        return wager_id
-
-    async def get_active_wager(self, user_id: int) -> Optional[Dict]:
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('''
-                SELECT * FROM wager_requirements WHERE user_id = ? AND status = 'active' ORDER BY created_at LIMIT 1
-            ''', (user_id,))
-            row = await cursor.fetchone()
-            return dict(row) if row else None
-
-    async def update_wager_progress(self, wager_id: str, bet_amount: int):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
-                UPDATE wager_requirements SET wagered_amount = wagered_amount + ? WHERE wager_id = ? AND status = 'active'
-            ''', (bet_amount, wager_id))
-            cursor = await db.execute('SELECT wagered_amount, total_to_wager, user_id, bonus_amount FROM wager_requirements WHERE wager_id = ?', (wager_id,))
-            row = await cursor.fetchone()
-            if row and row[0] >= row[1]:
-                await db.execute("UPDATE wager_requirements SET status = 'completed', completed_at = ? WHERE wager_id = ?",
-                                 (datetime.now(), wager_id))
-                await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (row[3], row[2]))
-            await db.commit()
-
-    # ----- Сессии блэкджека -----
+    # ---------- Сессии блэкджека ----------
     async def save_blackjack_session(self, user_id: int, game_data: Dict, bet: int):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute('''
