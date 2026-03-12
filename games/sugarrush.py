@@ -1,7 +1,6 @@
 import secrets
 import io
-from typing import List, Dict, Tuple
-from PIL import Image, ImageDraw, ImageFont
+from typing import List, Dict, Optional
 from .base_game import BaseGame, ProvablyFair
 
 class SugarRushGame(BaseGame):
@@ -9,21 +8,16 @@ class SugarRushGame(BaseGame):
         super().__init__("sugarrush")
         self.rows = 7
         self.cols = 7
-        self.symbols = ["🍬", "🍭", "🍫", "🍩", "🍪", "🧁", "🍰", "🎂"]
-        self.default_weights = [100,80,60,40,20,10,5,2]
-        self.default_values = [2,3,4,5,8,12,20,30]
-        self.wild = "🍬"
-        self.scatter = "🍭"
 
     async def load_settings(self, db):
         await super().load_settings(db)
         if not self.settings:
             self.settings = {
-                "symbols": self.symbols,
-                "weights": self.default_weights,
-                "values": self.default_values,
-                "wild": self.wild,
-                "scatter": self.scatter,
+                "symbols": ["🍬", "🍭", "🍫", "🍩", "🍪", "🧁", "🍰", "🎂"],
+                "weights": [100,80,60,40,20,10,5,2],
+                "values": [2,3,4,5,8,12,20,30],
+                "wild": "🍬",
+                "scatter": "🍭",
                 "cascade_multiplier": 1.5,
                 "free_spins_count": 10,
                 "max_mult": 2000,
@@ -96,7 +90,7 @@ class SugarRushGame(BaseGame):
 
     def generate_result(self, bet: int, user_id: int = None, force_bonus: bool = False) -> Dict:
         server, client = ProvablyFair.generate_seeds()
-        nonce = secrets.randbelow(1000000)
+        nonce = ProvablyFair.get_random_number(server, 0, 1000000)
         matrix = self._generate_initial_matrix(server, client, nonce)
         total_win = 0
         cascade_mult = 1.0
@@ -135,26 +129,13 @@ class SugarRushGame(BaseGame):
     def calculate_base_win(self, bet: int, result: Dict) -> int:
         return result["total_win"]
 
+    async def play_bonus_game(self, user_id: int, bet: int) -> int:
+        total = 0
+        for _ in range(10):
+            result = self.generate_result(bet, user_id, force_bonus=False)
+            win = result["total_win"] * 2
+            total += win
+        return total
+
     async def render(self, matrix: List[List[str]], win: int = 0) -> io.BytesIO:
-        cell_size = 80
-        width = self.cols * cell_size
-        height = self.rows * cell_size + 60
-        img = Image.new('RGB', (width, height), color=(20,20,30))
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arial.ttf", 32)
-        except:
-            font = ImageFont.load_default()
-        for i in range(self.rows):
-            for j in range(self.cols):
-                x = j * cell_size
-                y = i * cell_size
-                draw.rectangle([x,y,x+cell_size-2,y+cell_size-2], outline=(80,80,100), width=2)
-                sym = matrix[i][j]
-                if sym:
-                    draw.text((x+20,y+20), sym, fill=(255,255,255), font=font)
-        draw.text((10, height-50), f"Выигрыш: {win}", fill=(255,215,0), font=font)
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        buf.seek(0)
-        return buf
+        return await super().render(matrix, win)
