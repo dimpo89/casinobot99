@@ -1,5 +1,4 @@
-import secrets
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 from .base_game import BaseGame, ProvablyFair
 
 class RouletteGame(BaseGame):
@@ -27,7 +26,7 @@ class RouletteGame(BaseGame):
 
     def generate_result(self, bet: int, user_id: int = None) -> Dict:
         server, client = ProvablyFair.generate_seeds()
-        nonce = secrets.randbelow(1000000)
+        nonce = ProvablyFair.get_random_number(server, 0, 1000000)
         seed = ProvablyFair.get_hash(server, client, nonce)
         number = ProvablyFair.get_random_number(seed, 0, 36)
         return {
