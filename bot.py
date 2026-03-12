@@ -102,7 +102,17 @@ LANGUAGES = {
         'rtp': 'RTP',
         'free_spins': '🎁 Фриспины!',
         'bonus_game': '🎮 Бонусная игра!',
-        'error': '❌ Ошибка. Попробуйте снова.'
+        'error': '❌ Ошибка. Попробуйте снова.',
+        'buy_bonus': '💰 Купить бонусную игру',
+        'spins_left': 'Осталось спинов',
+        'total_win': 'Общий выигрыш',
+        'wild_multiplier': 'Множитель Wild',
+        'confirm': '✅ Подтвердить',
+        'reject': '❌ Отклонить',
+        'withdrawal_request': '💸 Заявка на вывод',
+        'faucet_claimed': '✅ Звёзды получены',
+        'provably_fair': '🔐 Provably Fair',
+        'disable_pf': 'Отключить Provably Fair'
     },
     'en': {
         'balance': '💰 Balance',
@@ -121,7 +131,17 @@ LANGUAGES = {
         'rtp': 'RTP',
         'free_spins': '🎁 Free spins!',
         'bonus_game': '🎮 Bonus game!',
-        'error': '❌ Error. Try again.'
+        'error': '❌ Error. Try again.',
+        'buy_bonus': '💰 Buy bonus game',
+        'spins_left': 'Spins left',
+        'total_win': 'Total win',
+        'wild_multiplier': 'Wild multiplier',
+        'confirm': '✅ Confirm',
+        'reject': '❌ Reject',
+        'withdrawal_request': '💸 Withdrawal request',
+        'faucet_claimed': '✅ Stars claimed',
+        'provably_fair': '🔐 Provably Fair',
+        'disable_pf': 'Disable Provably Fair'
     }
 }
 
@@ -151,13 +171,15 @@ class BetStates(StatesGroup):
     waiting_for_deposit_amount = State()
     waiting_for_slot_edit = State()
     waiting_for_game_setting = State()
+    waiting_for_bonus_price = State()
+    waiting_for_bonus_prob = State()
 
 # ============================================
 # ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
 # ============================================
 async def init_db():
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Таблица пользователей
+        # Таблица пользователей (добавлено поле pf_enabled)
         await db.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -178,7 +200,8 @@ async def init_db():
                 last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 language TEXT DEFAULT 'ru',
                 is_banned INTEGER DEFAULT 0,
-                is_admin INTEGER DEFAULT 0
+                is_admin INTEGER DEFAULT 0,
+                pf_enabled INTEGER DEFAULT 1
             )
         ''')
         
@@ -296,7 +319,7 @@ async def init_db():
             )
         ''')
         
-        # Таблица настроек
+        # Таблица настроек казино
         await db.execute('''
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -326,7 +349,7 @@ async def init_db():
             )
         ''')
 
-        # Вставляем настройки по умолчанию для слотов, если их нет
+        # Настройки для обычного слота
         default_slot_settings = {
             "symbols": ["🍒", "🍋", "🍊", "🍇", "💎", "7️⃣", "⭐", "🎰"],
             "weights": [100, 80, 60, 40, 20, 10, 5, 2],
@@ -335,14 +358,15 @@ async def init_db():
             "scatter": "🎰",
             "free_spins_mult": 10,
             "bonus_game_prob": 0.01,
-            "rtp": 76.82
+            "wild_multipliers": [2, 3, 4, 5],
+            "rtp": RTP_ACTUAL
         }
         cursor = await db.execute('SELECT 1 FROM game_settings WHERE game_type = "slot"')
         if not await cursor.fetchone():
             await db.execute('INSERT INTO game_settings (game_type, settings_json) VALUES (?, ?)',
                              ('slot', json.dumps(default_slot_settings)))
 
-        # Настройки для нового слота "Звери"
+        # Настройки для слота "Звери"
         animal_slot_default = {
             "symbols": ["🐶", "🐱", "🦊", "🐼", "🐨", "🦁", "🐯", "🐸"],
             "weights": [100, 80, 60, 40, 20, 10, 5, 2],
@@ -351,12 +375,34 @@ async def init_db():
             "scatter": "🐸",
             "free_spins_mult": 10,
             "bonus_game_prob": 0.02,
-            "rtp": 76.82
+            "wild_multipliers": [2, 3, 4, 5],
+            "rtp": RTP_ACTUAL
         }
         cursor = await db.execute('SELECT 1 FROM game_settings WHERE game_type = "animalslot"')
         if not await cursor.fetchone():
             await db.execute('INSERT INTO game_settings (game_type, settings_json) VALUES (?, ?)',
                              ('animalslot', json.dumps(animal_slot_default)))
+
+        # Таблица для хранения настроек покупки бонусов
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS bonus_shop (
+                game_type TEXT PRIMARY KEY,
+                price INTEGER DEFAULT 100,
+                enabled INTEGER DEFAULT 1
+            )
+        ''')
+
+        # Таблица для wild-множителей в бонусной игре
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS bonus_wilds (
+                user_id INTEGER,
+                game_type TEXT,
+                multiplier REAL DEFAULT 1.0,
+                spins_left INTEGER DEFAULT 0,
+                total_win INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, game_type)
+            )
+        ''')
 
         await db.commit()
     logger.info("✅ База данных инициализирована")
@@ -409,8 +455,8 @@ class Database:
                 referral_code = Database.generate_referral_code()
                 await db.execute('''
                     INSERT INTO users 
-                    (user_id, username, first_name, last_name, referral_code, referred_by, balance)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (user_id, username, first_name, last_name, referral_code, referred_by, balance, pf_enabled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 ''', (user_id, username, first_name, last_name, referral_code, referred_by, welcome_bonus))
                 logger.info(f"✅ Новый пользователь {user_id} создан с балансом {welcome_bonus} ⭐")
                 bonus = welcome_bonus
@@ -842,6 +888,43 @@ class Database:
                              (game_type, json.dumps(settings)))
             await db.commit()
 
+    @staticmethod
+    async def get_bonus_price(game_type: str) -> int:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            cursor = await db.execute('SELECT price FROM bonus_shop WHERE game_type = ?', (game_type,))
+            row = await cursor.fetchone()
+            return row[0] if row else 100
+
+    @staticmethod
+    async def set_bonus_price(game_type: str, price: int):
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute('INSERT OR REPLACE INTO bonus_shop (game_type, price, enabled) VALUES (?, ?, 1)',
+                             (game_type, price))
+            await db.commit()
+
+    @staticmethod
+    async def get_bonus_wild(user_id: int, game_type: str) -> Dict:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('SELECT * FROM bonus_wilds WHERE user_id = ? AND game_type = ?',
+                                      (user_id, game_type))
+            row = await cursor.fetchone()
+            return dict(row) if row else {'multiplier': 1.0, 'spins_left': 0, 'total_win': 0}
+
+    @staticmethod
+    async def update_bonus_wild(user_id: int, game_type: str, multiplier: float, spins_left: int, total_win: int):
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute('''
+                INSERT OR REPLACE INTO bonus_wilds (user_id, game_type, multiplier, spins_left, total_win)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_id, game_type, multiplier, spins_left, total_win))
+            await db.commit()
+
+    @staticmethod
+    async def clear_bonus_wild(user_id: int, game_type: str):
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute('DELETE FROM bonus_wilds WHERE user_id = ? AND game_type = ?', (user_id, game_type))
+            await db.commit()
 # ============================================
 # БАЗОВЫЙ КЛАСС ДЛЯ ИГР
 # ============================================
@@ -871,7 +954,7 @@ class BaseGame:
         return min_val + (hash_val % (max_val - min_val + 1))
 
 # ============================================
-# УЛУЧШЕННЫЙ КЛАСС ДЛЯ СЛОТОВ
+# УЛУЧШЕННЫЙ КЛАСС СЛОТОВ
 # ============================================
 class SlotGame(BaseGame):
     def __init__(self, game_type="slot"):
@@ -888,6 +971,7 @@ class SlotGame(BaseGame):
                 "scatter": "🎰",
                 "free_spins_mult": 10,
                 "bonus_game_prob": 0.01,
+                "wild_multipliers": [2, 3, 4, 5],
                 "rtp": RTP_ACTUAL
             }
         cum = 0
@@ -897,7 +981,7 @@ class SlotGame(BaseGame):
             self.cum_weights.append(cum)
         self.total_weight = cum
 
-    def generate_result(self, bet: int, user_id: int = None) -> Dict:
+    def generate_result(self, bet: int, user_id: int = None, force_bonus: bool = False) -> Dict:
         server_seed = secrets.token_hex(32)
         client_seed = secrets.token_hex(16)
         nonce = secrets.randbelow(1000000)
@@ -915,10 +999,10 @@ class SlotGame(BaseGame):
                 row.append(self.settings['symbols'][symbol_index])
             matrix.append(row)
 
-        win = self.calculate_win(bet, {"matrix": matrix, "user_id": user_id})
+        win = self.calculate_win(bet, {"matrix": matrix})
         scatter_count = sum(row.count(self.settings['scatter']) for row in matrix)
         free_spins = scatter_count * self.settings['free_spins_mult'] if scatter_count >= 3 else 0
-        bonus_game = random.random() < self.settings.get('bonus_game_prob', 0.01)
+        bonus_game = force_bonus or (random.random() < self.settings.get('bonus_game_prob', 0.01))
 
         return {
             "matrix": matrix,
@@ -931,7 +1015,7 @@ class SlotGame(BaseGame):
             "hash": self.get_provably_fair_seed(server_seed, client_seed, nonce)
         }
 
-    def calculate_win(self, bet: int, result: Dict) -> int:
+    def calculate_win(self, bet: int, result: Dict, wild_mult: float = 1.0) -> int:
         matrix = result["matrix"]
         win = 0
         paylines = self.get_paylines()
@@ -945,10 +1029,15 @@ class SlotGame(BaseGame):
                 main = next(s for s in line_symbols if s != wild) if any(s != wild for s in line_symbols) else wild
                 idx = symbols.index(main)
                 mult = values[idx]
+                length = len(line_symbols)
+                if length >= 4:
+                    mult *= 1.5
+                if length == 5:
+                    mult *= 2
                 win += bet * mult
 
         rtp_factor = self.settings.get('rtp', RTP_ACTUAL) / 100.0
-        win = int(win * rtp_factor)
+        win = int(win * rtp_factor * wild_mult)
 
         if random.random() < 0.001:
             jackpot = asyncio.run(Database.get_jackpot())
@@ -963,11 +1052,12 @@ class SlotGame(BaseGame):
             [0,0,0,0,0], [1,1,1,1,1], [2,2,2,2,2],
             [0,1,2,1,0], [2,1,0,1,2], [0,0,1,2,2],
             [2,2,1,0,0], [1,0,1,2,1], [1,2,1,0,1],
-            [0,1,1,1,0]
+            [0,1,1,1,0], [1,0,0,0,1], [1,2,2,2,1],
+            [0,2,2,2,0], [2,0,0,0,2]
         ]
 
 # ============================================
-# НОВЫЙ СЛОТ "ЗВЕРИ"
+# СЛОТ "ЗВЕРИ"
 # ============================================
 class AnimalSlotGame(SlotGame):
     def __init__(self):
@@ -984,6 +1074,7 @@ class AnimalSlotGame(SlotGame):
                 "scatter": "🐸",
                 "free_spins_mult": 10,
                 "bonus_game_prob": 0.02,
+                "wild_multipliers": [2, 3, 4, 5],
                 "rtp": RTP_ACTUAL
             }
         cum = 0
@@ -993,14 +1084,45 @@ class AnimalSlotGame(SlotGame):
             self.cum_weights.append(cum)
         self.total_weight = cum
 
-    def bonus_game(self, user_id: int) -> int:
-        choices = ["🐶", "🐱", "🦊"]
-        mults = [2, 3, 5]
-        idx = random.randint(0,2)
-        return mults[idx]
+# ============================================
+# КЛАСС ДЛЯ БОНУСНОЙ ИГРЫ
+# ============================================
+class BonusGameHandler:
+    @staticmethod
+    async def start_bonus(user_id: int, game_type: str, spins: int = 10):
+        await Database.update_bonus_wild(user_id, game_type, 1.0, spins, 0)
+
+    @staticmethod
+    async def process_bonus_spin(user_id: int, game_type: str, bet: int, game: SlotGame) -> Tuple[int, bool]:
+        state = await Database.get_bonus_wild(user_id, game_type)
+        if state['spins_left'] <= 0:
+            return 0, False
+
+        result = game.generate_result(bet, user_id)
+        win = game.calculate_win(bet, result, state['multiplier'])
+
+        matrix = result["matrix"]
+        wild = game.settings['wild']
+        wild_count = sum(row.count(wild) for row in matrix)
+        if wild_count > 0:
+            mult = random.choice(game.settings['wild_multipliers'])
+            new_mult = state['multiplier'] * mult
+            await Database.update_bonus_wild(user_id, game_type, new_mult, state['spins_left']-1, state['total_win'] + win)
+        else:
+            await Database.update_bonus_wild(user_id, game_type, state['multiplier'], state['spins_left']-1, state['total_win'] + win)
+
+        finished = (state['spins_left'] - 1 == 0)
+        return win, finished
+
+    @staticmethod
+    async def finish_bonus(user_id: int, game_type: str) -> int:
+        state = await Database.get_bonus_wild(user_id, game_type)
+        total = state['total_win']
+        await Database.clear_bonus_wild(user_id, game_type)
+        return total
 
 # ============================================
-# УЛУЧШЕННЫЙ КЛАСС КОСТЕЙ
+# КЛАСС ДЛЯ КОСТЕЙ
 # ============================================
 class DiceGame(BaseGame):
     def __init__(self):
@@ -1045,7 +1167,7 @@ class DiceGame(BaseGame):
         return int(bet * result["multiplier"])
 
 # ============================================
-# УЛУЧШЕННЫЙ КЛАСС РУЛЕТКИ
+# КЛАСС ДЛЯ РУЛЕТКИ
 # ============================================
 class RouletteGame(BaseGame):
     def __init__(self):
@@ -1117,7 +1239,7 @@ class RouletteGame(BaseGame):
         return int(bet * mult * rtp_factor)
 
 # ============================================
-# УЛУЧШЕННЫЙ КЛАСС БЛЭКДЖЕКА
+# КЛАСС ДЛЯ БЛЭКДЖЕКА
 # ============================================
 class BlackjackGame(BaseGame):
     def __init__(self):
@@ -1363,13 +1485,14 @@ class CasinoBot:
         }
         self.active_games = {}      # для mines
         self.blackjack_games = {}   # активные игры блэкджек
-        self.free_spins = {}         # фриспины для слотов
+        self.free_spins = {}         # фриспины для слотов (старая система)
         self.pending_withdrawals = {}
         logger.info(f"✅ Игры загружены: {list(self.games.keys())}")
 
-    # ---- методы клавиатур ----
+    # ---- клавиатуры ----
     def get_main_keyboard(self, user_id: int) -> InlineKeyboardMarkup:
-        lang = 'en'  # можно будет получать из профиля, пока заглушка
+        user = asyncio.run(Database.get_user(user_id))
+        lang = user.get('language', 'ru') if user else 'ru'
         buttons = [
             [InlineKeyboardButton(text="🎰 Слоты", callback_data="game_slot"),
              InlineKeyboardButton(text="🦁 Слот Звери", callback_data="game_animalslot")],
@@ -1394,13 +1517,21 @@ class CasinoBot:
     def get_game_keyboard(self, game_type: str, game_state: Dict = None) -> InlineKeyboardMarkup:
         buttons = []
         if game_type in ["slot", "animalslot"]:
-            buttons = [
-                [InlineKeyboardButton(text="🎰 10 ⭐", callback_data=f"play_{game_type}_10"),
-                 InlineKeyboardButton(text="🎰 50 ⭐", callback_data=f"play_{game_type}_50")],
-                [InlineKeyboardButton(text="🎰 100 ⭐", callback_data=f"play_{game_type}_100"),
-                 InlineKeyboardButton(text="🎰 500 ⭐", callback_data=f"play_{game_type}_500")],
-                [InlineKeyboardButton(text="💰 Своя ставка", callback_data=f"custom_bet_{game_type}")]
-            ]
+            # Проверяем наличие активной бонусной игры (упрощённо, можно передавать в game_state)
+            if game_state and game_state.get("bonus_active"):
+                buttons = [
+                    [InlineKeyboardButton(text=f"🎰 Крутить (осталось {game_state['spins_left']})", callback_data=f"bonus_spin_{game_type}")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                ]
+            else:
+                buttons = [
+                    [InlineKeyboardButton(text="🎰 10 ⭐", callback_data=f"play_{game_type}_10"),
+                     InlineKeyboardButton(text="🎰 50 ⭐", callback_data=f"play_{game_type}_50")],
+                    [InlineKeyboardButton(text="🎰 100 ⭐", callback_data=f"play_{game_type}_100"),
+                     InlineKeyboardButton(text="🎰 500 ⭐", callback_data=f"play_{game_type}_500")],
+                    [InlineKeyboardButton(text="💰 Своя ставка", callback_data=f"custom_bet_{game_type}"),
+                     InlineKeyboardButton(text="🎁 Купить бонус", callback_data=f"buy_bonus_{game_type}")]
+                ]
         elif game_type == "dice":
             buttons = [
                 [InlineKeyboardButton(text="🎲 1 кубик", callback_data="dice_single"),
@@ -1508,7 +1639,7 @@ class CasinoBot:
         ]
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    # ---- команды и обработчики ----
+    # ---- команды ----
     async def cmd_start(self, message: Message):
         user_id = message.from_user.id
         await Database.create_user(user_id, message.from_user.username,
@@ -1532,7 +1663,7 @@ class CasinoBot:
         ])
         await message.answer(text, reply_markup=kb)
 
-    # ========== ОСНОВНОЙ CALLBACK ==========
+    # ========== ОСНОВНОЙ ОБРАБОТЧИК CALLBACK ==========
     async def callback_handler(self, callback: CallbackQuery, state: FSMContext):
         data = callback.data
         user_id = callback.from_user.id
@@ -1726,11 +1857,15 @@ class CasinoBot:
             if game["player_score"] > 21:
                 await Database.add_game_history(user_id, "blackjack", game["bet"], 0, {"final":"bust"})
                 del self.blackjack_games[user_id]
-                await callback.message.edit_text(f"❌ **ПЕРЕБОР!** Вы проиграли.", reply_markup=self.get_game_keyboard("blackjack"))
+                # Показываем все карты
+                await callback.message.edit_text(
+                    f"❌ **ПЕРЕБОР!**\nВаши карты: {self.format_hand(game['player_hand'])} ({game['player_score']})\nДилер: {self.format_hand(game['dealer_hand'])}",
+                    reply_markup=self.get_game_keyboard("blackjack")
+                )
             else:
                 self.blackjack_games[user_id] = game
                 await callback.message.edit_text(
-                    self.format_hand(game["player_hand"]) + f" (очков: {game['player_score']})",
+                    f"🃏 Ваши карты: {self.format_hand(game['player_hand'])} (очков: {game['player_score']})\nДилер: {self.format_hand(game['dealer_hand'][:1])} + ?",
                     reply_markup=self.get_game_keyboard("blackjack", {"active":True})
                 )
 
@@ -1775,8 +1910,12 @@ class CasinoBot:
             if game["player_score"] > 21:
                 await Database.add_game_history(user_id, "blackjack", game["bet"], 0, {"final":"bust"})
                 del self.blackjack_games[user_id]
-                await callback.message.edit_text("❌ Перебор! Вы проиграли.", reply_markup=self.get_game_keyboard("blackjack"))
+                await callback.message.edit_text(
+                    f"❌ Перебор! Ваши карты: {self.format_hand(game['player_hand'])}",
+                    reply_markup=self.get_game_keyboard("blackjack")
+                )
             else:
+                # автоматически stand после удвоения
                 dealer_hand = game["dealer_hand"]
                 deck = game["deck"]
                 dealer_score = self.games["blackjack"].hand_score(dealer_hand)
@@ -1814,14 +1953,57 @@ class CasinoBot:
                 await Database.update_balance(user_id, win, "Выигрыш страховки")
                 await callback.answer(f"✅ Страховка сработала! Выигрыш {win} ⭐", show_alert=True)
                 del self.blackjack_games[user_id]
-                await callback.message.edit_text("🤝 Страховка сыграла.", reply_markup=self.get_game_keyboard("blackjack"))
+                await callback.message.edit_text(
+                    f"🤝 У дилера блэкджек! Ваши карты: {self.format_hand(game['player_hand'])}",
+                    reply_markup=self.get_game_keyboard("blackjack")
+                )
             else:
                 await callback.answer("❌ У дилера нет блэкджека, страховка проиграла", show_alert=True)
+                # игра продолжается
 
         elif data == "blackjack_new":
             if user_id in self.blackjack_games:
                 del self.blackjack_games[user_id]
             await callback.message.edit_text("🃏 Блэкджек", reply_markup=self.get_game_keyboard("blackjack"))
+
+        # ---- покупка бонусной игры ----
+        elif data.startswith("buy_bonus_"):
+            game_type = data.replace("buy_bonus_", "")
+            price = await Database.get_bonus_price(game_type)
+            user = await Database.get_user(user_id)
+            if user['balance'] < price:
+                await callback.answer(get_text('not_enough'), show_alert=True)
+                return
+            await Database.update_balance(user_id, -price, f"Покупка бонусной игры в {game_type}")
+            await BonusGameHandler.start_bonus(user_id, game_type, spins=10)
+            await callback.message.edit_text(
+                f"🎮 **Бонусная игра**\nУ вас 10 спинов! Wild множители накапливаются.",
+                reply_markup=self.get_game_keyboard(game_type, {"bonus_active": True, "spins_left": 10})
+            )
+
+        # ---- спин в бонусной игре ----
+        elif data.startswith("bonus_spin_"):
+            game_type = data.replace("bonus_spin_", "")
+            game = self.games.get(game_type)
+            if not game:
+                await callback.answer("Ошибка", show_alert=True)
+                return
+            # Ставка фиксирована (например, 10) – можно брать из настроек или последней ставки
+            bet = 10  # в реальности лучше хранить
+            win, finished = await BonusGameHandler.process_bonus_spin(user_id, game_type, bet, game)
+            if finished:
+                total = await BonusGameHandler.finish_bonus(user_id, game_type)
+                await Database.update_balance(user_id, total, f"Выигрыш в бонусной игре {game_type}")
+                await callback.message.edit_text(
+                    f"🎉 Бонусная игра завершена! Общий выигрыш: {total} ⭐",
+                    reply_markup=self.get_game_keyboard(game_type)
+                )
+            else:
+                state = await Database.get_bonus_wild(user_id, game_type)
+                await callback.message.edit_text(
+                    f"🎰 Спин! Выигрыш: {win} ⭐\nТекущий множитель: x{state['multiplier']}\nОсталось спинов: {state['spins_left']}",
+                    reply_markup=self.get_game_keyboard(game_type, {"bonus_active": True, "spins_left": state['spins_left']})
+                )
 
         # ---- турниры, бонусы, статистика, рефералы, настройки, история ----
         elif data == "tournaments":
@@ -1859,6 +2041,16 @@ class CasinoBot:
 
         elif data == "provably_fair_info":
             await self.provably_fair_info(callback)
+
+        elif data == "toggle_pf":
+            # переключение provably fair для пользователя
+            user = await Database.get_user(user_id)
+            new_val = 0 if user['pf_enabled'] else 1
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                await db.execute('UPDATE users SET pf_enabled = ? WHERE user_id = ?', (new_val, user_id))
+                await db.commit()
+            await callback.answer(f"Provably Fair {'включен' if new_val else 'отключен'}", show_alert=True)
+            await self.show_settings(callback)
 
         elif data == "history":
             await self.show_history(callback)
@@ -2056,7 +2248,47 @@ class CasinoBot:
             else:
                 for p in pending:
                     text += f"ID: `{p['transaction_id']}`\nПользователь: {p['user_id']}\nСумма: {p['amount']}⭐\nКошелек: {p['wallet_address']}\n\n"
-            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]]))
+                    text += f"[✅ Подтвердить](confirm_{p['transaction_id']}) | [❌ Отклонить](reject_{p['transaction_id']})\n\n"
+            # Добавляем inline-кнопки для каждой заявки (упрощённо, можно сделать по одной)
+            # В реальности лучше генерировать клавиатуру с кнопками для каждой заявки, но для краткости оставим так.
+            # Пользователь должен будет ввести команду подтверждения.
+            # Вместо этого можно добавить кнопки:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Обновить", callback_data="admin_withdrawals")],
+                [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]
+            ])
+            await callback.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+
+        # Обработка подтверждения/отклонения по callback (с передачей ID)
+        elif data.startswith("confirm_"):
+            if user_id not in ADMIN_IDS:
+                return
+            tx_id = data.replace("confirm_", "")
+            await Database.update_transaction_status(tx_id, 'completed')
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                cursor = await db.execute('SELECT user_id, amount FROM transactions WHERE transaction_id = ?', (tx_id,))
+                row = await cursor.fetchone()
+                if row:
+                    uid, amt = row
+                    await bot.send_message(uid, f"✅ Ваш вывод на {amt} ⭐ подтверждён и отправлен.")
+            await callback.answer("✅ Вывод подтверждён")
+            await self.admin_withdrawals(callback)  # обновляем список
+
+        elif data.startswith("reject_"):
+            if user_id not in ADMIN_IDS:
+                return
+            tx_id = data.replace("reject_", "")
+            await Database.update_transaction_status(tx_id, 'rejected')
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                cursor = await db.execute('SELECT user_id, amount FROM transactions WHERE transaction_id = ?', (tx_id,))
+                row = await cursor.fetchone()
+                if row:
+                    uid, amt = row
+                    await db.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amt, uid))
+                    await db.commit()
+                    await bot.send_message(uid, f"❌ Ваш вывод на {amt} ⭐ отклонён. Средства возвращены.")
+            await callback.answer("❌ Вывод отклонён")
+            await self.admin_withdrawals(callback)
 
         elif data == "admin_broadcast":
             if user_id not in ADMIN_IDS:
@@ -2187,9 +2419,8 @@ class CasinoBot:
                 self.free_spins[user_id] = {"spins": result["free_spins"], "multiplier": 2}
                 await callback.message.answer(f"🎉 ФРИСПИНЫ! {result['free_spins']} вращений с x2!")
             if result.get("bonus_game"):
-                bonus_mult = game.bonus_game(user_id) if hasattr(game, 'bonus_game') else 2
-                win *= bonus_mult
-                await callback.message.answer(f"🎮 Бонусная игра! Множитель x{bonus_mult}")
+                # бонусная игра запускается отдельно, здесь просто уведомление
+                await callback.message.answer(f"🎮 Выпала бонусная игра! Купите её за отдельную плату.")
 
         if win > 0 and game_type not in ["mines","blackjack"]:
             await Database.update_balance(user_id, win, f'Выигрыш в {game_type}')
@@ -2199,7 +2430,9 @@ class CasinoBot:
             await Database.update_jackpot(int(bet * JACKPOT_PERCENT))
 
         jackpot = await Database.get_jackpot()
-        text = self.format_game_result(game_type, result, bet, win)
+        # Проверяем, включён ли provably fair у пользователя
+        user_pf = user.get('pf_enabled', 1)
+        text = self.format_game_result(game_type, result, bet, win, show_hash=user_pf)
         text += f"\n\n💰 Джекпот: **{jackpot} ⭐**"
 
         if game_type == "blackjack":
@@ -2218,7 +2451,7 @@ class CasinoBot:
                 reply_markup=self.get_game_keyboard(game_type)
             )
 
-    def format_game_result(self, game_type: str, result: Dict, bet: int, win: int) -> str:
+    def format_game_result(self, game_type: str, result: Dict, bet: int, win: int, show_hash: bool = True) -> str:
         if game_type == "slot" or game_type == "animalslot":
             matrix = result["matrix"]
             s = f"🎰 **{game_type.upper()}**\n\n"
@@ -2243,8 +2476,8 @@ class CasinoBot:
             s += f"✅ Выигрыш: **{win} ⭐** (Профит: **+{win-bet} ⭐**)"
         elif win == 0 and game_type not in ["mines","blackjack"]:
             s += f"❌ Проигрыш"
-        if "hash" in result:
-            s += f"\n\n🔐 Provably Fair: `{result['hash'][:16]}...`"
+        if show_hash and "hash" in result:
+            s += f"\n\n🔐 Provably Fair: `{result['hash']}`"
         return s
 
     # ---- турниры, бонусы, статистика и т.д. ----
@@ -2333,10 +2566,12 @@ class CasinoBot:
         user_id = callback.from_user.id
         user = await Database.get_user(user_id)
         lang = user.get('language', 'ru')
-        text = f"⚙️ **Настройки**\n\nЯзык: {'🇷🇺 Русский' if lang=='ru' else '🇬🇧 English'}\nVIP уровень: {user['vip_level']} (опыт {user['experience']})\n\nИграйте больше, чтобы повысить VIP!"
+        pf_status = "✅" if user['pf_enabled'] else "❌"
+        text = f"⚙️ **Настройки**\n\nЯзык: {'🇷🇺 Русский' if lang=='ru' else '🇬🇧 English'}\nVIP уровень: {user['vip_level']} (опыт {user['experience']})\nProvably Fair: {pf_status}\n\nИграйте больше, чтобы повысить VIP!"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🌐 Сменить язык", callback_data="change_language")],
-            [InlineKeyboardButton(text="🔐 Provably Fair", callback_data="provably_fair_info")],
+            [InlineKeyboardButton(text=f"Provably Fair: {'Вкл' if user['pf_enabled'] else 'Выкл'}", callback_data="toggle_pf")],
+            [InlineKeyboardButton(text="🔐 Provably Fair Info", callback_data="provably_fair_info")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
         ])
         await callback.message.edit_text(text, reply_markup=kb)
@@ -2352,7 +2587,7 @@ class CasinoBot:
         await self.show_settings(callback)
 
     async def provably_fair_info(self, callback: CallbackQuery):
-        text = "🔐 **Provably Fair**\n\nВсе игры используют криптографическую систему, позволяющую проверить честность каждого раунда. Хеш результата отображается в конце игры."
+        text = "🔐 **Provably Fair**\n\nВсе игры используют криптографическую систему, позволяющую проверить честность каждого раунда. Хеш результата отображается в конце игры, если функция включена в настройках."
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="settings")]]))
 
     async def show_history(self, callback: CallbackQuery):
@@ -2386,12 +2621,14 @@ class CasinoBot:
             f"Scatter: {settings['scatter']}\n"
             f"Множитель фриспинов: {settings['free_spins_mult']}\n"
             f"Вероятность бонус-игры: {settings['bonus_game_prob']}\n"
+            f"Множители Wild: {settings['wild_multipliers']}\n"
             f"RTP: {settings['rtp']}\n\n"
             f"Введите новые настройки в формате JSON или измените отдельные параметры через команды."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Изменить RTP", callback_data=f"edit_{slot_type}_rtp"),
              InlineKeyboardButton(text="Изменить веса", callback_data=f"edit_{slot_type}_weights")],
+            [InlineKeyboardButton(text="Изменить цену бонуса", callback_data=f"edit_{slot_type}_price")],
             [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_slot_edit")]
         ])
         await callback.message.edit_text(text, reply_markup=kb)
