@@ -1,4 +1,5 @@
 import secrets
+from typing import Dict, List, Optional, Tuple
 from .base_game import BaseGame, ProvablyFair
 
 class RouletteGame(BaseGame):
