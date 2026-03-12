@@ -408,7 +408,7 @@ async def init_db():
     logger.info("✅ База данных инициализирована")
 
 # ============================================
-# КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (ПОЛНЫЙ)
+# КЛАСС ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ
 # ============================================
 class Database:
     @staticmethod
@@ -925,6 +925,7 @@ class Database:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute('DELETE FROM bonus_wilds WHERE user_id = ? AND game_type = ?', (user_id, game_type))
             await db.commit()
+
 # ============================================
 # БАЗОВЫЙ КЛАСС ДЛЯ ИГР
 # ============================================
@@ -954,7 +955,7 @@ class BaseGame:
         return min_val + (hash_val % (max_val - min_val + 1))
 
 # ============================================
-# УЛУЧШЕННЫЙ КЛАСС СЛОТОВ
+# УЛУЧШЕННЫЙ КЛАСС ДЛЯ СЛОТОВ
 # ============================================
 class SlotGame(BaseGame):
     def __init__(self, game_type="slot"):
@@ -1468,6 +1469,7 @@ class KenoGame(BaseGame):
             rtp_factor = self.settings.get('rtp', RTP_ACTUAL) / 100.0
             return int(bet * mult * rtp_factor)
         return 0
+
 # ============================================
 # ОСНОВНОЙ КЛАСС БОТА
 # ============================================
@@ -1490,9 +1492,7 @@ class CasinoBot:
         logger.info(f"✅ Игры загружены: {list(self.games.keys())}")
 
     # ---- клавиатуры ----
-    def get_main_keyboard(self, user_id: int) -> InlineKeyboardMarkup:
-        user = asyncio.run(Database.get_user(user_id))
-        lang = user.get('language', 'ru') if user else 'ru'
+    def get_main_keyboard(self, lang: str, user_id: int) -> InlineKeyboardMarkup:
         buttons = [
             [InlineKeyboardButton(text="🎰 Слоты", callback_data="game_slot"),
              InlineKeyboardButton(text="🦁 Слот Звери", callback_data="game_animalslot")],
@@ -1514,13 +1514,12 @@ class CasinoBot:
             buttons.append([InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    def get_game_keyboard(self, game_type: str, game_state: Dict = None) -> InlineKeyboardMarkup:
+    def get_game_keyboard(self, game_type: str, game_state: Dict = None, lang: str = 'ru') -> InlineKeyboardMarkup:
         buttons = []
         if game_type in ["slot", "animalslot"]:
-            # Проверяем наличие активной бонусной игры (упрощённо, можно передавать в game_state)
             if game_state and game_state.get("bonus_active"):
                 buttons = [
-                    [InlineKeyboardButton(text=f"🎰 Крутить (осталось {game_state['spins_left']})", callback_data=f"bonus_spin_{game_type}")],
+                    [InlineKeyboardButton(text=f"🎰 {get_text('spins_left', lang)} {game_state['spins_left']}", callback_data=f"bonus_spin_{game_type}")],
                     [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
                 ]
             else:
@@ -1530,7 +1529,7 @@ class CasinoBot:
                     [InlineKeyboardButton(text="🎰 100 ⭐", callback_data=f"play_{game_type}_100"),
                      InlineKeyboardButton(text="🎰 500 ⭐", callback_data=f"play_{game_type}_500")],
                     [InlineKeyboardButton(text="💰 Своя ставка", callback_data=f"custom_bet_{game_type}"),
-                     InlineKeyboardButton(text="🎁 Купить бонус", callback_data=f"buy_bonus_{game_type}")]
+                     InlineKeyboardButton(text=f"🎁 {get_text('buy_bonus', lang)}", callback_data=f"buy_bonus_{game_type}")]
                 ]
         elif game_type == "dice":
             buttons = [
@@ -1641,14 +1640,13 @@ class CasinoBot:
 
     # ---- команды ----
     async def cmd_start(self, message: Message):
-        print(f"🔥 cmd_start вызвана для пользователя {message.from_user.id}")
         user_id = message.from_user.id
         await Database.create_user(user_id, message.from_user.username,
                                    message.from_user.first_name, message.from_user.last_name)
         user = await Database.get_user(user_id)
         lang = user.get('language', 'ru')
         text = get_text('welcome', lang) + f"\n{get_text('balance', lang)}: {user['balance']} ⭐"
-        await message.answer(text, reply_markup=self.get_main_keyboard(user_id))
+        await message.answer(text, reply_markup=self.get_main_keyboard(lang, user_id))
 
     async def cmd_balance(self, user_id: int, message: Message):
         user = await Database.get_user(user_id)
@@ -1669,9 +1667,16 @@ class CasinoBot:
         data = callback.data
         user_id = callback.from_user.id
 
+        # получаем язык пользователя для ответов
+        user = await Database.get_user(user_id)
+        lang = user.get('language', 'ru') if user else 'ru'
+
         # ---- главное меню ----
         if data == "main_menu":
-            await callback.message.edit_text("🎰 **ГЛАВНОЕ МЕНЮ**", reply_markup=self.get_main_keyboard(user_id))
+            await callback.message.edit_text(
+                "🎰 **ГЛАВНОЕ МЕНЮ**",
+                reply_markup=self.get_main_keyboard(lang, user_id)
+            )
 
         # ---- баланс, пополнение, вывод ----
         elif data == "balance":
@@ -1706,7 +1711,7 @@ class CasinoBot:
             if game in self.games:
                 await callback.message.edit_text(
                     f"🎮 **{game.upper()}**\nВыберите параметры:",
-                    reply_markup=self.get_game_keyboard(game)
+                    reply_markup=self.get_game_keyboard(game, lang=lang)
                 )
             else:
                 await callback.answer("❌ Игра недоступна", show_alert=True)
@@ -1722,7 +1727,7 @@ class CasinoBot:
             except:
                 await callback.answer("❌ Неверная сумма", show_alert=True)
                 return
-            await self.play_game(callback, game, bet)
+            await self.play_game(callback, game, bet, lang=lang)
 
         elif data.startswith("custom_bet_"):
             game = data.replace("custom_bet_", "")
@@ -1802,11 +1807,17 @@ class CasinoBot:
                 await Database.update_jackpot(int(game["bet"]*JACKPOT_PERCENT))
                 del self.active_games[user_id]
                 jackpot = await Database.get_jackpot()
-                await callback.message.edit_text(f"✅ Вы выиграли {win} ⭐!\n💰 Джекпот: {jackpot} ⭐", reply_markup=self.get_game_keyboard("mines"))
+                await callback.message.edit_text(
+                    f"✅ Вы выиграли {win} ⭐!\n💰 Джекпот: {jackpot} ⭐",
+                    reply_markup=self.get_game_keyboard("mines", lang=lang)
+                )
             elif data == "mines_new":
                 if user_id in self.active_games:
                     del self.active_games[user_id]
-                await callback.message.edit_text("💣 Mines", reply_markup=self.get_game_keyboard("mines"))
+                await callback.message.edit_text(
+                    "💣 Mines",
+                    reply_markup=self.get_game_keyboard("mines", lang=lang)
+                )
             elif data.startswith("mine_cell_"):
                 cell = int(data.replace("mine_cell_",""))
                 if user_id not in self.active_games or self.active_games[user_id]["game"] != "mines":
@@ -1821,13 +1832,16 @@ class CasinoBot:
                     del self.active_games[user_id]
                     await Database.update_jackpot(int(game["bet"]*JACKPOT_PERCENT))
                     await Database.add_game_history(user_id, "mines", game["bet"], 0, game["result"])
-                    await callback.message.edit_text("💥 **БАБАХ!** Вы проиграли.", reply_markup=self.get_game_keyboard("mines"))
+                    await callback.message.edit_text(
+                        "💥 **БАБАХ!** Вы проиграли.",
+                        reply_markup=self.get_game_keyboard("mines", lang=lang)
+                    )
                 else:
                     self.active_games[user_id] = game
                     cur_win = self.games["mines"].calculate_win(game["bet"], game["result"], game["revealed"])
                     await callback.message.edit_text(
                         f"✅ Безопасно! Текущий выигрыш: {cur_win} ⭐",
-                        reply_markup=self.get_game_keyboard("mines", game)
+                        reply_markup=self.get_game_keyboard("mines", game, lang=lang)
                     )
 
         # ---- кено ----
@@ -1858,16 +1872,15 @@ class CasinoBot:
             if game["player_score"] > 21:
                 await Database.add_game_history(user_id, "blackjack", game["bet"], 0, {"final":"bust"})
                 del self.blackjack_games[user_id]
-                # Показываем все карты
                 await callback.message.edit_text(
                     f"❌ **ПЕРЕБОР!**\nВаши карты: {self.format_hand(game['player_hand'])} ({game['player_score']})\nДилер: {self.format_hand(game['dealer_hand'])}",
-                    reply_markup=self.get_game_keyboard("blackjack")
+                    reply_markup=self.get_game_keyboard("blackjack", lang=lang)
                 )
             else:
                 self.blackjack_games[user_id] = game
                 await callback.message.edit_text(
                     f"🃏 Ваши карты: {self.format_hand(game['player_hand'])} (очков: {game['player_score']})\nДилер: {self.format_hand(game['dealer_hand'][:1])} + ?",
-                    reply_markup=self.get_game_keyboard("blackjack", {"active":True})
+                    reply_markup=self.get_game_keyboard("blackjack", {"active":True}, lang=lang)
                 )
 
         elif data == "blackjack_stand":
@@ -1891,7 +1904,7 @@ class CasinoBot:
             jackpot = await Database.get_jackpot()
             await callback.message.edit_text(
                 f"🃏 Результат:\nВаши: {self.format_hand(game['player_hand'])} ({game['player_score']})\nДилер: {self.format_hand(dealer_hand)} ({dealer_score})\n\n{'✅' if win>0 else '❌'} Выигрыш: {win} ⭐\n💰 Джекпот: {jackpot} ⭐",
-                reply_markup=self.get_game_keyboard("blackjack")
+                reply_markup=self.get_game_keyboard("blackjack", lang=lang)
             )
 
         elif data == "blackjack_double":
@@ -1913,10 +1926,9 @@ class CasinoBot:
                 del self.blackjack_games[user_id]
                 await callback.message.edit_text(
                     f"❌ Перебор! Ваши карты: {self.format_hand(game['player_hand'])}",
-                    reply_markup=self.get_game_keyboard("blackjack")
+                    reply_markup=self.get_game_keyboard("blackjack", lang=lang)
                 )
             else:
-                # автоматически stand после удвоения
                 dealer_hand = game["dealer_hand"]
                 deck = game["deck"]
                 dealer_score = self.games["blackjack"].hand_score(dealer_hand)
@@ -1933,7 +1945,7 @@ class CasinoBot:
                 jackpot = await Database.get_jackpot()
                 await callback.message.edit_text(
                     f"🃏 Результат (удвоение):\nВаши: {self.format_hand(game['player_hand'])} ({game['player_score']})\nДилер: {self.format_hand(dealer_hand)} ({dealer_score})\n\n{'✅' if win>0 else '❌'} Выигрыш: {win} ⭐\n💰 Джекпот: {jackpot} ⭐",
-                    reply_markup=self.get_game_keyboard("blackjack")
+                    reply_markup=self.get_game_keyboard("blackjack", lang=lang)
                 )
 
         elif data == "blackjack_insurance":
@@ -1956,16 +1968,18 @@ class CasinoBot:
                 del self.blackjack_games[user_id]
                 await callback.message.edit_text(
                     f"🤝 У дилера блэкджек! Ваши карты: {self.format_hand(game['player_hand'])}",
-                    reply_markup=self.get_game_keyboard("blackjack")
+                    reply_markup=self.get_game_keyboard("blackjack", lang=lang)
                 )
             else:
                 await callback.answer("❌ У дилера нет блэкджека, страховка проиграла", show_alert=True)
-                # игра продолжается
 
         elif data == "blackjack_new":
             if user_id in self.blackjack_games:
                 del self.blackjack_games[user_id]
-            await callback.message.edit_text("🃏 Блэкджек", reply_markup=self.get_game_keyboard("blackjack"))
+            await callback.message.edit_text(
+                "🃏 Блэкджек",
+                reply_markup=self.get_game_keyboard("blackjack", lang=lang)
+            )
 
         # ---- покупка бонусной игры ----
         elif data.startswith("buy_bonus_"):
@@ -1973,13 +1987,13 @@ class CasinoBot:
             price = await Database.get_bonus_price(game_type)
             user = await Database.get_user(user_id)
             if user['balance'] < price:
-                await callback.answer(get_text('not_enough'), show_alert=True)
+                await callback.answer(get_text('not_enough', lang), show_alert=True)
                 return
             await Database.update_balance(user_id, -price, f"Покупка бонусной игры в {game_type}")
             await BonusGameHandler.start_bonus(user_id, game_type, spins=10)
             await callback.message.edit_text(
-                f"🎮 **Бонусная игра**\nУ вас 10 спинов! Wild множители накапливаются.",
-                reply_markup=self.get_game_keyboard(game_type, {"bonus_active": True, "spins_left": 10})
+                f"🎮 **{get_text('bonus_game', lang)}**\n{get_text('spins_left', lang)}: 10. {get_text('wild_multiplier', lang)} накапливаются.",
+                reply_markup=self.get_game_keyboard(game_type, {"bonus_active": True, "spins_left": 10}, lang=lang)
             )
 
         # ---- спин в бонусной игре ----
@@ -1989,35 +2003,34 @@ class CasinoBot:
             if not game:
                 await callback.answer("Ошибка", show_alert=True)
                 return
-            # Ставка фиксирована (например, 10) – можно брать из настроек или последней ставки
-            bet = 10  # в реальности лучше хранить
+            bet = 10  # фиксированная ставка для бонусной игры (можно изменить)
             win, finished = await BonusGameHandler.process_bonus_spin(user_id, game_type, bet, game)
             if finished:
                 total = await BonusGameHandler.finish_bonus(user_id, game_type)
                 await Database.update_balance(user_id, total, f"Выигрыш в бонусной игре {game_type}")
                 await callback.message.edit_text(
-                    f"🎉 Бонусная игра завершена! Общий выигрыш: {total} ⭐",
-                    reply_markup=self.get_game_keyboard(game_type)
+                    f"🎉 {get_text('bonus_game', lang)} завершена! {get_text('total_win', lang)}: {total} ⭐",
+                    reply_markup=self.get_game_keyboard(game_type, lang=lang)
                 )
             else:
                 state = await Database.get_bonus_wild(user_id, game_type)
                 await callback.message.edit_text(
-                    f"🎰 Спин! Выигрыш: {win} ⭐\nТекущий множитель: x{state['multiplier']}\nОсталось спинов: {state['spins_left']}",
-                    reply_markup=self.get_game_keyboard(game_type, {"bonus_active": True, "spins_left": state['spins_left']})
+                    f"🎰 Спин! {get_text('win', lang)}: {win} ⭐\n{get_text('wild_multiplier', lang)}: x{state['multiplier']}\n{get_text('spins_left', lang)}: {state['spins_left']}",
+                    reply_markup=self.get_game_keyboard(game_type, {"bonus_active": True, "spins_left": state['spins_left']}, lang=lang)
                 )
 
         # ---- турниры, бонусы, статистика, рефералы, настройки, история ----
         elif data == "tournaments":
-            await self.show_tournaments(callback)
+            await self.show_tournaments(callback, lang)
 
         elif data == "bonuses":
-            await self.show_bonuses(callback)
+            await self.show_bonuses(callback, lang)
 
         elif data == "claim_daily":
-            await self.claim_daily(callback)
+            await self.claim_daily(callback, lang)
 
         elif data == "claim_faucet":
-            await self.claim_faucet(callback)
+            await self.claim_faucet(callback, lang)
 
         elif data == "activate_bonus":
             await state.set_state(BetStates.waiting_for_bonus_code)
@@ -2029,32 +2042,31 @@ class CasinoBot:
             )
 
         elif data == "stats":
-            await self.show_stats(callback)
+            await self.show_stats(callback, lang)
 
         elif data == "referrals":
-            await self.show_referrals(callback)
+            await self.show_referrals(callback, lang)
 
         elif data == "settings":
-            await self.show_settings(callback)
+            await self.show_settings(callback, lang)
 
         elif data == "change_language":
             await self.change_language(callback)
 
         elif data == "provably_fair_info":
-            await self.provably_fair_info(callback)
+            await self.provably_fair_info(callback, lang)
 
         elif data == "toggle_pf":
-            # переключение provably fair для пользователя
             user = await Database.get_user(user_id)
             new_val = 0 if user['pf_enabled'] else 1
             async with aiosqlite.connect(DATABASE_PATH) as db:
                 await db.execute('UPDATE users SET pf_enabled = ? WHERE user_id = ?', (new_val, user_id))
                 await db.commit()
             await callback.answer(f"Provably Fair {'включен' if new_val else 'отключен'}", show_alert=True)
-            await self.show_settings(callback)
+            await self.show_settings(callback, lang)
 
         elif data == "history":
-            await self.show_history(callback)
+            await self.show_history(callback, lang)
 
         # ---- АДМИНКА ----
         elif data == "admin_panel":
@@ -2249,18 +2261,17 @@ class CasinoBot:
             else:
                 for p in pending:
                     text += f"ID: `{p['transaction_id']}`\nПользователь: {p['user_id']}\nСумма: {p['amount']}⭐\nКошелек: {p['wallet_address']}\n\n"
-                    text += f"[✅ Подтвердить](confirm_{p['transaction_id']}) | [❌ Отклонить](reject_{p['transaction_id']})\n\n"
-            # Добавляем inline-кнопки для каждой заявки (упрощённо, можно сделать по одной)
-            # В реальности лучше генерировать клавиатуру с кнопками для каждой заявки, но для краткости оставим так.
-            # Пользователь должен будет ввести команду подтверждения.
-            # Вместо этого можно добавить кнопки:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Обновить", callback_data="admin_withdrawals")],
-                [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]
-            ])
-            await callback.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+                    # Добавляем кнопки прямо в текст нельзя, поэтому сформируем клавиатуру
+            # Формируем клавиатуру с кнопками для каждой заявки
+            kb_buttons = []
+            for p in pending:
+                kb_buttons.append([
+                    InlineKeyboardButton(text=f"✅ Подтвердить {p['user_id']} {p['amount']}⭐", callback_data=f"confirm_{p['transaction_id']}"),
+                    InlineKeyboardButton(text=f"❌ Отклонить {p['user_id']}", callback_data=f"reject_{p['transaction_id']}")
+                ])
+            kb_buttons.append([InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")])
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
 
-        # Обработка подтверждения/отклонения по callback (с передачей ID)
         elif data.startswith("confirm_"):
             if user_id not in ADMIN_IDS:
                 return
@@ -2273,7 +2284,7 @@ class CasinoBot:
                     uid, amt = row
                     await bot.send_message(uid, f"✅ Ваш вывод на {amt} ⭐ подтверждён и отправлен.")
             await callback.answer("✅ Вывод подтверждён")
-            await self.admin_withdrawals(callback)  # обновляем список
+            await self.admin_withdrawals(callback)
 
         elif data.startswith("reject_"):
             if user_id not in ADMIN_IDS:
@@ -2345,14 +2356,14 @@ class CasinoBot:
     def format_hand(self, hand):
         return " ".join([f"{r}{s}" for r,s in hand])
 
-    async def play_game(self, callback: CallbackQuery, game_type: str, bet: int, **kwargs):
+    async def play_game(self, callback: CallbackQuery, game_type: str, bet: int, lang: str = 'ru', **kwargs):
         user_id = callback.from_user.id
         user = await Database.get_user(user_id)
         if not user:
-            await callback.answer(get_text('user_not_found'), show_alert=True)
+            await callback.answer(get_text('user_not_found', lang), show_alert=True)
             return
         if user['balance'] < bet:
-            await callback.answer(get_text('not_enough'), show_alert=True)
+            await callback.answer(get_text('not_enough', lang), show_alert=True)
             return
 
         game = self.games.get(game_type)
@@ -2370,7 +2381,7 @@ class CasinoBot:
             if fs['spins'] == 0:
                 del self.free_spins[user_id]
             mult = fs.get('multiplier', 1)
-            await callback.answer(f"🎁 Фриспин! Осталось {fs['spins']}", show_alert=False)
+            await callback.answer(f"🎁 {get_text('free_spins', lang)}! {get_text('spins_left', lang)} {fs['spins']}", show_alert=False)
 
         if need_deduct:
             if not await Database.update_balance(user_id, -bet, f'Ставка в {game_type}'):
@@ -2418,10 +2429,9 @@ class CasinoBot:
             win = game.calculate_win(bet, result) * mult
             if result.get("free_spins", 0) > 0:
                 self.free_spins[user_id] = {"spins": result["free_spins"], "multiplier": 2}
-                await callback.message.answer(f"🎉 ФРИСПИНЫ! {result['free_spins']} вращений с x2!")
+                await callback.message.answer(f"🎉 {get_text('free_spins', lang)}! {result['free_spins']} {get_text('spins_left', lang)} x2!")
             if result.get("bonus_game"):
-                # бонусная игра запускается отдельно, здесь просто уведомление
-                await callback.message.answer(f"🎮 Выпала бонусная игра! Купите её за отдельную плату.")
+                await callback.message.answer(f"🎮 {get_text('bonus_game', lang)}! {get_text('buy_bonus', lang)} за отдельную плату.")
 
         if win > 0 and game_type not in ["mines","blackjack"]:
             await Database.update_balance(user_id, win, f'Выигрыш в {game_type}')
@@ -2431,25 +2441,24 @@ class CasinoBot:
             await Database.update_jackpot(int(bet * JACKPOT_PERCENT))
 
         jackpot = await Database.get_jackpot()
-        # Проверяем, включён ли provably fair у пользователя
         user_pf = user.get('pf_enabled', 1)
         text = self.format_game_result(game_type, result, bet, win, show_hash=user_pf)
-        text += f"\n\n💰 Джекпот: **{jackpot} ⭐**"
+        text += f"\n\n💰 {get_text('jackpot', lang)}: **{jackpot} ⭐**"
 
         if game_type == "blackjack":
             await callback.message.edit_text(
                 text,
-                reply_markup=self.get_game_keyboard(game_type, {"active": True})
+                reply_markup=self.get_game_keyboard(game_type, {"active": True}, lang=lang)
             )
         elif game_type == "mines":
             await callback.message.edit_text(
                 text,
-                reply_markup=self.get_game_keyboard(game_type, self.active_games.get(user_id))
+                reply_markup=self.get_game_keyboard(game_type, self.active_games.get(user_id), lang=lang)
             )
         else:
             await callback.message.edit_text(
                 text,
-                reply_markup=self.get_game_keyboard(game_type)
+                reply_markup=self.get_game_keyboard(game_type, lang=lang)
             )
 
     def format_game_result(self, game_type: str, result: Dict, bet: int, win: int, show_hash: bool = True) -> str:
@@ -2482,7 +2491,7 @@ class CasinoBot:
         return s
 
     # ---- турниры, бонусы, статистика и т.д. ----
-    async def show_tournaments(self, callback: CallbackQuery):
+    async def show_tournaments(self, callback: CallbackQuery, lang: str = 'ru'):
         tours = await Database.get_active_tournaments()
         if not tours:
             text = "🏆 Нет активных турниров"
@@ -2496,7 +2505,7 @@ class CasinoBot:
                 text += f"**{t['name']}**\nПриз: {t['prize_pool']} ⭐\nИгра: {t['game_type']}\nОсталось: {hours}ч {minutes}м\n\n"
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]]))
 
-    async def show_bonuses(self, callback: CallbackQuery):
+    async def show_bonuses(self, callback: CallbackQuery, lang: str = 'ru'):
         user_id = callback.from_user.id
         can, streak, bonus = await Database.get_daily_reward(user_id)
         faucet = int(await Database.get_setting('faucet_amount'))
@@ -2515,7 +2524,7 @@ class CasinoBot:
         ])
         await callback.message.edit_text(text, reply_markup=kb)
 
-    async def claim_daily(self, callback: CallbackQuery):
+    async def claim_daily(self, callback: CallbackQuery, lang: str = 'ru'):
         user_id = callback.from_user.id
         can, streak, bonus = await Database.get_daily_reward(user_id)
         if not can:
@@ -2523,9 +2532,9 @@ class CasinoBot:
             return
         await Database.update_balance(user_id, bonus, "Ежедневный бонус")
         await callback.answer(f"✅ Получено {bonus} ⭐! Серия {streak}", show_alert=True)
-        await self.show_bonuses(callback)
+        await self.show_bonuses(callback, lang)
 
-    async def claim_faucet(self, callback: CallbackQuery):
+    async def claim_faucet(self, callback: CallbackQuery, lang: str = 'ru'):
         user_id = callback.from_user.id
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cooldown = int((await db.execute('SELECT value FROM settings WHERE key="faucet_cooldown"')).fetchone()[0])
@@ -2543,10 +2552,10 @@ class CasinoBot:
             await db.execute('INSERT INTO transactions (transaction_id, user_id, amount, type, status, description) VALUES (?,?,?,?,?,?)',
                            (str(uuid.uuid4()), user_id, amount, 'faucet', 'completed', 'Кран'))
             await db.commit()
-        await callback.answer(f"✅ Получено {amount} ⭐!", show_alert=True)
-        await self.show_bonuses(callback)
+        await callback.answer(f"✅ {get_text('faucet_claimed', lang)} {amount} ⭐!", show_alert=True)
+        await self.show_bonuses(callback, lang)
 
-    async def show_stats(self, callback: CallbackQuery):
+    async def show_stats(self, callback: CallbackQuery, lang: str = 'ru'):
         user_id = callback.from_user.id
         user = await Database.get_user(user_id)
         top = await Database.get_top_players(5)
@@ -2555,7 +2564,7 @@ class CasinoBot:
             text += f"{i}. {p['username'] or 'Аноним'}: {p['total_wins']} побед\n"
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]]))
 
-    async def show_referrals(self, callback: CallbackQuery):
+    async def show_referrals(self, callback: CallbackQuery, lang: str = 'ru'):
         user_id = callback.from_user.id
         user = await Database.get_user(user_id)
         bot_user = await bot.me()
@@ -2563,12 +2572,11 @@ class CasinoBot:
         text = f"👥 **Рефералы**\n\nВаша ссылка:\n`{link}`\n\nПриглашайте друзей и получайте бонусы!"
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]]))
 
-    async def show_settings(self, callback: CallbackQuery):
+    async def show_settings(self, callback: CallbackQuery, lang: str = 'ru'):
         user_id = callback.from_user.id
         user = await Database.get_user(user_id)
-        lang = user.get('language', 'ru')
         pf_status = "✅" if user['pf_enabled'] else "❌"
-        text = f"⚙️ **Настройки**\n\nЯзык: {'🇷🇺 Русский' if lang=='ru' else '🇬🇧 English'}\nVIP уровень: {user['vip_level']} (опыт {user['experience']})\nProvably Fair: {pf_status}\n\nИграйте больше, чтобы повысить VIP!"
+        text = f"⚙️ **Настройки**\n\n{get_text('language', lang)}: {'🇷🇺 Русский' if lang=='ru' else '🇬🇧 English'}\n{get_text('vip_level', lang)}: {user['vip_level']} ({get_text('experience', lang)}: {user['experience']})\nProvably Fair: {pf_status}\n\nИграйте больше, чтобы повысить VIP!"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🌐 Сменить язык", callback_data="change_language")],
             [InlineKeyboardButton(text=f"Provably Fair: {'Вкл' if user['pf_enabled'] else 'Выкл'}", callback_data="toggle_pf")],
@@ -2585,13 +2593,14 @@ class CasinoBot:
             await db.execute('UPDATE users SET language = ? WHERE user_id = ?', (new_lang, user_id))
             await db.commit()
         await callback.answer(f"Язык изменен на {'English' if new_lang=='en' else 'Русский'}", show_alert=True)
-        await self.show_settings(callback)
+        # после смены языка нужно перерисовать текущее меню
+        await self.show_settings(callback, new_lang)
 
-    async def provably_fair_info(self, callback: CallbackQuery):
+    async def provably_fair_info(self, callback: CallbackQuery, lang: str = 'ru'):
         text = "🔐 **Provably Fair**\n\nВсе игры используют криптографическую систему, позволяющую проверить честность каждого раунда. Хеш результата отображается в конце игры, если функция включена в настройках."
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="settings")]]))
 
-    async def show_history(self, callback: CallbackQuery):
+    async def show_history(self, callback: CallbackQuery, lang: str = 'ru'):
         user_id = callback.from_user.id
         async with aiosqlite.connect(DATABASE_PATH) as db:
             db.row_factory = aiosqlite.Row
@@ -2749,7 +2758,7 @@ async def handle_custom_bet(message: Message, state: FSMContext):
             if any(n < 1 or n > 80 for n in nums):
                 await message.answer("❌ Числа от 1 до 80")
                 return
-            if len(set(nums)) != len(nums):
+            if len(set(nums)) != len(nums)):
                 await message.answer("❌ Числа не должны повторяться")
                 return
         except:
@@ -2788,7 +2797,7 @@ async def handle_custom_bet(message: Message, state: FSMContext):
 
     await casino_bot.play_game(
         CallbackQuery(id='', from_user=message.from_user, message=message, data=f'play_{game_type}_{bet}'),
-        game_type, bet, **kwargs
+        game_type, bet, lang=user.get('language','ru'), **kwargs
     )
 
 @dp.message(BetStates.waiting_for_bonus_code)
