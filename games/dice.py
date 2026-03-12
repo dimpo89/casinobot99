@@ -1,5 +1,4 @@
-import secrets
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 from .base_game import BaseGame, ProvablyFair
 
 class DiceGame(BaseGame):
@@ -10,17 +9,16 @@ class DiceGame(BaseGame):
         await super().load_settings(db)
         if not self.settings:
             self.settings = {
-                "single": {1:6, 2:3, 3:2, 4:1.5, 5:1.2, 6:1},
-                "double": {2:12,3:6,4:4,5:3,6:2,7:1.5,8:2,9:3,10:4,11:6,12:12},
-                "max_mult": 12,
+                "single": {1:2, 2:1.5, 3:1.2, 4:1, 5:0.8, 6:0.5},
+                "double": {2:3, 3:2, 4:1.5, 5:1.2, 6:1, 7:0.8, 8:1, 9:1.2, 10:1.5, 11:2, 12:3},
+                "max_mult": 10,
                 "rtp": 76.82,
                 "volatility": 0.1
             }
 
     def generate_result(self, bet: int, user_id: int = None, mode: str = "single") -> Dict:
         server, client = ProvablyFair.generate_seeds()
-        nonce = secrets.randbelow(1000000)
-
+        nonce = ProvablyFair.get_random_number(server, 0, 1000000)  # упростим
         if mode == "single":
             seed = ProvablyFair.get_hash(server, client, nonce)
             result = ProvablyFair.get_random_number(seed, 1, 6)
@@ -32,7 +30,6 @@ class DiceGame(BaseGame):
             d2 = ProvablyFair.get_random_number(seed2, 1, 6)
             result = d1 + d2
             base_mult = self.settings['double'][result]
-
         return {
             "result": result,
             "base_mult": base_mult,
