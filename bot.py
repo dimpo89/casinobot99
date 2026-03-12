@@ -1641,6 +1641,7 @@ class CasinoBot:
 
     # ---- команды ----
     async def cmd_start(self, message: Message):
+        print(f"🔥 cmd_start вызвана для пользователя {message.from_user.id}")
         user_id = message.from_user.id
         await Database.create_user(user_id, message.from_user.username,
                                    message.from_user.first_name, message.from_user.last_name)
