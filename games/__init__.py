@@ -9,14 +9,8 @@ from .sugarrush import SugarRushGame
 from .blackjack import BlackjackGame
 
 __all__ = [
-    'BaseGame',
-    'ProvablyFair',
-    'DiceGame',
-    'RouletteGame',
-    'MinesGame',
-    'PlinkoGame',
-    'KenoGame',
-    'DogHouseGame',
-    'SugarRushGame',
-    'BlackjackGame'
+    'BaseGame', 'ProvablyFair',
+    'DiceGame', 'RouletteGame', 'MinesGame',
+    'PlinkoGame', 'KenoGame', 'DogHouseGame',
+    'SugarRushGame', 'BlackjackGame'
 ]
