@@ -2758,7 +2758,7 @@ async def handle_custom_bet(message: Message, state: FSMContext):
             if any(n < 1 or n > 80 for n in nums):
                 await message.answer("❌ Числа от 1 до 80")
                 return
-            if len(set(nums)) != len(nums)):
+            if len(set(nums)) != len(nums):
                 await message.answer("❌ Числа не должны повторяться")
                 return
         except:
