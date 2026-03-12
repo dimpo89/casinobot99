@@ -1,5 +1,4 @@
-import secrets
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 from .base_game import BaseGame, ProvablyFair
 
 class PlinkoGame(BaseGame):
@@ -20,8 +19,7 @@ class PlinkoGame(BaseGame):
 
     def generate_result(self, bet: int, user_id: int = None, risk: str = "medium") -> Dict:
         server, client = ProvablyFair.generate_seeds()
-        nonce = secrets.randbelow(1000000)
-
+        nonce = ProvablyFair.get_random_number(server, 0, 1000000)
         rows = 16
         pos = rows / 2
         for step in range(rows):
@@ -34,7 +32,6 @@ class PlinkoGame(BaseGame):
         final = int(round(pos))
         final = max(0, min(rows-1, final))
         base_mult = self.settings[risk][final]
-
         return {
             "final_position": final,
             "base_mult": base_mult,
