@@ -1,5 +1,4 @@
-import secrets
-from typing import List, Dict
+from typing import Dict, List, Optional
 from .base_game import BaseGame, ProvablyFair
 
 class BlackjackGame(BaseGame):
@@ -22,7 +21,7 @@ class BlackjackGame(BaseGame):
 
     def generate_result(self, bet: int, user_id: int = None) -> Dict:
         server, client = ProvablyFair.generate_seeds()
-        nonce = secrets.randbelow(1000000)
+        nonce = ProvablyFair.get_random_number(server, 0, 1000000)
         deck = [(rank, suit) for suit in self.suits for rank in self.ranks] * self.settings['decks']
         shuffled = self._shuffle_deck(deck, server, client, nonce)
         player_hand = [shuffled[0], shuffled[2]]
