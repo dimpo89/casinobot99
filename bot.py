@@ -68,6 +68,7 @@ RTP_ACTUAL = 76.82
 JACKPOT_PERCENT = 0.05
 MAX_BET = 1000000
 MIN_BET = 1
+MAX_WIN_MULTIPLIER = 10000  # максимальный выигрыш в x от ставки
 
 print("="*60 + "\n")
 
@@ -75,9 +76,6 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ============================================
-# ЯЗЫКИ
-# ============================================
 LANGUAGES = {
     'ru': {
         'balance': '💰 Баланс',
@@ -146,9 +144,6 @@ LANGUAGES = {
 def get_text(key: str, lang: str = 'ru') -> str:
     return LANGUAGES.get(lang, LANGUAGES['ru']).get(key, key)
 
-# ============================================
-# СОСТОЯНИЯ FSM
-# ============================================
 class BetStates(StatesGroup):
     waiting_for_bet = State()
     waiting_for_withdrawal_amount = State()
@@ -172,13 +167,10 @@ class BetStates(StatesGroup):
     waiting_for_bonus_price = State()
     waiting_for_bonus_prob = State()
     waiting_for_wager_multiplier = State()
+    waiting_for_blackjack_action = State()
 
-# ============================================
-# ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
-# ============================================
 async def init_db():
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Таблица пользователей
         await db.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -205,7 +197,6 @@ async def init_db():
             )
         ''')
         
-        # Таблица транзакций
         await db.execute('''
             CREATE TABLE IF NOT EXISTS transactions (
                 transaction_id TEXT PRIMARY KEY,
@@ -221,7 +212,6 @@ async def init_db():
             )
         ''')
         
-        # Таблица игр
         await db.execute('''
             CREATE TABLE IF NOT EXISTS games (
                 game_id TEXT PRIMARY KEY,
@@ -235,7 +225,6 @@ async def init_db():
             )
         ''')
         
-        # Таблица настроек RTP
         await db.execute('''
             CREATE TABLE IF NOT EXISTS rtp_settings (
                 game_type TEXT PRIMARY KEY,
@@ -249,7 +238,6 @@ async def init_db():
             )
         ''')
         
-        # Таблица джекпота
         await db.execute('''
             CREATE TABLE IF NOT EXISTS jackpot (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -260,7 +248,6 @@ async def init_db():
         ''')
         await db.execute('INSERT OR IGNORE INTO jackpot (id, amount) VALUES (1, 1000)')
         
-        # Таблица бонусных кодов
         await db.execute('''
             CREATE TABLE IF NOT EXISTS bonus_codes (
                 code TEXT PRIMARY KEY,
@@ -273,7 +260,6 @@ async def init_db():
             )
         ''')
         
-        # Таблица использованных бонусов
         await db.execute('''
             CREATE TABLE IF NOT EXISTS bonus_uses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -283,7 +269,6 @@ async def init_db():
             )
         ''')
         
-        # Таблица турниров
         await db.execute('''
             CREATE TABLE IF NOT EXISTS tournaments (
                 tournament_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,7 +284,6 @@ async def init_db():
             )
         ''')
         
-        # Таблица участников турниров
         await db.execute('''
             CREATE TABLE IF NOT EXISTS tournament_participants (
                 tournament_id INTEGER,
@@ -310,7 +294,6 @@ async def init_db():
             )
         ''')
         
-        # Таблица ежедневных наград
         await db.execute('''
             CREATE TABLE IF NOT EXISTS daily_rewards (
                 user_id INTEGER,
@@ -320,7 +303,6 @@ async def init_db():
             )
         ''')
         
-        # Таблица настроек казино
         await db.execute('''
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -328,7 +310,6 @@ async def init_db():
             )
         ''')
         
-        # Настройки по умолчанию
         default_settings = [
             ('faucet_amount', '10'),
             ('faucet_cooldown', '3600'),
@@ -338,13 +319,12 @@ async def init_db():
             ('referral_bonus', '50'),
             ('maintenance_mode', 'false'),
             ('wager_multiplier', '35'),
-            ('wager_games', 'dice,roulette,mines,plinko,keno,doghouse,sugarrush')
+            ('wager_games', 'dice,roulette,mines,plinko,keno,doghouse,sugarrush,blackjack')
         ]
         
         for key, value in default_settings:
             await db.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', (key, value))
         
-        # Таблица настроек игр
         await db.execute('''
             CREATE TABLE IF NOT EXISTS game_settings (
                 game_type TEXT PRIMARY KEY,
@@ -352,7 +332,6 @@ async def init_db():
             )
         ''')
 
-        # Настройки для обычного слота (базовый)
         default_slot_settings = {
             "symbols": ["🍒", "🍋", "🍊", "🍇", "💎", "7️⃣", "⭐", "🎰"],
             "weights": [100, 80, 60, 40, 20, 10, 5, 2],
@@ -363,14 +342,14 @@ async def init_db():
             "bonus_game_prob": 0.01,
             "wild_multipliers": [2, 3, 4, 5],
             "rtp": RTP_ACTUAL,
-            "volatility": 0.15
+            "volatility": 0.15,
+            "max_mult": 1000
         }
         cursor = await db.execute('SELECT 1 FROM game_settings WHERE game_type = "slot"')
         if not await cursor.fetchone():
             await db.execute('INSERT INTO game_settings (game_type, settings_json) VALUES (?, ?)',
                              ('slot', json.dumps(default_slot_settings)))
 
-        # Настройки для Dog House
         doghouse_settings = {
             "reels": 5,
             "rows": 3,
@@ -383,14 +362,14 @@ async def init_db():
             "bonus_game": "sticky_wild",
             "wild_multipliers": [2, 3, 4, 5],
             "rtp": RTP_ACTUAL,
-            "volatility": 0.2
+            "volatility": 0.2,
+            "max_mult": 500
         }
         cursor = await db.execute('SELECT 1 FROM game_settings WHERE game_type = "doghouse"')
         if not await cursor.fetchone():
             await db.execute('INSERT INTO game_settings (game_type, settings_json) VALUES (?, ?)',
                              ('doghouse', json.dumps(doghouse_settings)))
 
-        # Настройки для Sugar Rush
         sugarrush_settings = {
             "reels": 7,
             "rows": 7,
@@ -403,14 +382,26 @@ async def init_db():
             "bonus_game": "cascade",
             "cascade_multiplier": 1.5,
             "rtp": RTP_ACTUAL,
-            "volatility": 0.25
+            "volatility": 0.25,
+            "max_mult": 2000
         }
         cursor = await db.execute('SELECT 1 FROM game_settings WHERE game_type = "sugarrush"')
         if not await cursor.fetchone():
             await db.execute('INSERT INTO game_settings (game_type, settings_json) VALUES (?, ?)',
                              ('sugarrush', json.dumps(sugarrush_settings)))
 
-        # Таблица для хранения настроек покупки бонусов
+        blackjack_settings = {
+            "decks": 4,
+            "blackjack_payout": 1.5,
+            "rtp": RTP_ACTUAL,
+            "volatility": 0.1,
+            "max_mult": 3
+        }
+        cursor = await db.execute('SELECT 1 FROM game_settings WHERE game_type = "blackjack"')
+        if not await cursor.fetchone():
+            await db.execute('INSERT INTO game_settings (game_type, settings_json) VALUES (?, ?)',
+                             ('blackjack', json.dumps(blackjack_settings)))
+
         await db.execute('''
             CREATE TABLE IF NOT EXISTS bonus_shop (
                 game_type TEXT PRIMARY KEY,
@@ -419,7 +410,6 @@ async def init_db():
             )
         ''')
 
-        # Таблица для wild-множителей в бонусной игре
         await db.execute('''
             CREATE TABLE IF NOT EXISTS bonus_wilds (
                 user_id INTEGER,
@@ -432,7 +422,6 @@ async def init_db():
             )
         ''')
 
-        # Таблица для требований по вейджеру
         await db.execute('''
             CREATE TABLE IF NOT EXISTS wager_requirements (
                 wager_id TEXT PRIMARY KEY,
@@ -447,12 +436,18 @@ async def init_db():
             )
         ''')
 
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS blackjack_sessions (
+                user_id INTEGER PRIMARY KEY,
+                game_data TEXT,
+                bet INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         await db.commit()
     logger.info("✅ База данных инициализирована")
 
-# ============================================
-# КЛАССЫ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ (частично вынесены)
-# ============================================
 class Database:
     @staticmethod
     async def get_user(user_id: int) -> Optional[Dict]:
@@ -650,19 +645,6 @@ class Database:
                 FROM users
                 WHERE total_bets > 0
                 ORDER BY total_wins DESC
-                LIMIT ?
-            ''', (limit,))
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    @staticmethod
-    async def get_top_players_by_balance(limit: int = 10) -> List[Dict]:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute('''
-                SELECT user_id, username, balance, vip_level
-                FROM users
-                ORDER BY balance DESC
                 LIMIT ?
             ''', (limit,))
             rows = await cursor.fetchall()
@@ -970,12 +952,37 @@ class Database:
             await db.execute('DELETE FROM bonus_wilds WHERE user_id = ? AND game_type = ?', (user_id, game_type))
             await db.commit()
 
-# ============================================
-# RTPManager (сложный алгоритм)
-# ============================================
-class RTPManager:
     @staticmethod
-    async def calculate_win(game_type: str, base_win: int, bet: int, user_id: int) -> int:
+    async def save_blackjack_session(user_id: int, game_data: Dict, bet: int):
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute('''
+                INSERT OR REPLACE INTO blackjack_sessions (user_id, game_data, bet, created_at)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, json.dumps(game_data), bet, datetime.now()))
+            await db.commit()
+
+    @staticmethod
+    async def get_blackjack_session(user_id: int) -> Optional[Dict]:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute('SELECT * FROM blackjack_sessions WHERE user_id = ?', (user_id,))
+            row = await cursor.fetchone()
+            if row:
+                return {'game_data': json.loads(row['game_data']), 'bet': row['bet']}
+            return None
+
+    @staticmethod
+    async def delete_blackjack_session(user_id: int):
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute('DELETE FROM blackjack_sessions WHERE user_id = ?', (user_id,))
+            await db.commit()
+
+class RTPManager:
+    """Управление возвратом игроку с учётом истории и ограничений"""
+    
+    @staticmethod
+    async def calculate_win(game_type: str, base_win: int, bet: int, user_id: int, max_mult: int) -> int:
+        # Получаем настройки RTP
         settings = await Database.get_rtp_settings(game_type)
         target_rtp = settings.get('current_rtp', RTP_ACTUAL) / 100.0
         volatility = settings.get('volatility', 0.15)
@@ -990,32 +997,34 @@ class RTPManager:
             total_bets = row[0] or 0
             total_wins = row[1] or 0
 
-        # Генерация нормального распределения (метод Бокса-Мюллера)
+        # Генерация нормального распределения
         u1 = random.random()
         u2 = random.random()
         z = math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
         rtp_factor = target_rtp + volatility * z
         rtp_factor = max(0.3, min(2.5, rtp_factor))
 
-        # Динамическая коррекция на основе истории
+        # Коррекция на основе истории (чтобы на дистанции сходилось к target_rtp)
         if total_bets > 10:
             current_rtp = total_wins / total_bets if total_bets > 0 else 0
             deviation = target_rtp - current_rtp
             correction = 1.0 + (deviation * 0.3)
             rtp_factor *= correction
 
+        # Применяем ограничение максимального множителя
         final_win = int(base_win * rtp_factor)
-        logger.info(f"RTP {game_type}: base={base_win}, factor={rtp_factor:.3f}, final={final_win}")
+        max_allowed = bet * max_mult
+        if final_win > max_allowed:
+            final_win = max_allowed
+
+        logger.info(f"RTP {game_type}: base={base_win}, factor={rtp_factor:.3f}, final={final_win}, max={max_allowed}")
         return final_win
 
-# ============================================
-# WagerManager (отыгрыш бонусов)
-# ============================================
 class WagerManager:
     @staticmethod
     async def add_bonus(user_id: int, amount: int, description: str = ""):
         wager_mult = int(await Database.get_setting('wager_multiplier') or 35)
-        eligible_games = await Database.get_setting('wager_games') or 'dice,roulette,mines,plinko,keno,doghouse,sugarrush'
+        eligible_games = await Database.get_setting('wager_games') or 'dice,roulette,mines,plinko,keno,doghouse,sugarrush,blackjack'
 
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute('UPDATE users SET bonus_balance = bonus_balance + ? WHERE user_id = ?', (amount, user_id))
@@ -1098,9 +1107,6 @@ class WagerManager:
                 'progress': round(wagered / total * 100, 1)
             }
 
-# ============================================
-# ProvablyFair
-# ============================================
 class ProvablyFair:
     @staticmethod
     def generate_seeds() -> Tuple[str, str]:
@@ -1117,9 +1123,7 @@ class ProvablyFair:
     def get_random_number(seed: str, min_val: int, max_val: int) -> int:
         hash_val = int(hashlib.sha256(seed.encode()).hexdigest(), 16)
         return min_val + (hash_val % (max_val - min_val + 1))
-# ============================================
-# БАЗОВЫЙ КЛАСС ИГРЫ
-# ============================================
+
 class BaseGame:
     def __init__(self, game_type: str):
         self.game_type = game_type
@@ -1128,24 +1132,20 @@ class BaseGame:
     async def load_settings(self):
         self.settings = await Database.get_game_settings(self.game_type)
 
-    async def get_rtp(self) -> float:
-        return self.settings.get('rtp', RTP_ACTUAL)
+    async def get_max_mult(self) -> int:
+        return self.settings.get('max_mult', 1000)
 
-    async def get_volatility(self) -> float:
-        return self.settings.get('volatility', 0.15)
-
-    def calculate_win(self, bet: int, result: Dict) -> int:
+    def calculate_base_win(self, bet: int, result: Dict) -> int:
         raise NotImplementedError
 
     def generate_result(self, bet: int, user_id: int = None) -> Dict:
         raise NotImplementedError
 
-    async def apply_rtp(self, base_win: int, bet: int, user_id: int) -> int:
-        return await RTPManager.calculate_win(self.game_type, base_win, bet, user_id)
+    async def calculate_win(self, bet: int, result: Dict, user_id: int) -> int:
+        base_win = self.calculate_base_win(bet, result)
+        max_mult = await self.get_max_mult()
+        return await RTPManager.calculate_win(self.game_type, base_win, bet, user_id, max_mult)
 
-# ============================================
-# КОСТИ (Dice)
-# ============================================
 class DiceGame(BaseGame):
     def __init__(self):
         super().__init__("dice")
@@ -1156,13 +1156,11 @@ class DiceGame(BaseGame):
             self.settings = {
                 "single": {1:6, 2:3, 3:2, 4:1.5, 5:1.2, 6:1},
                 "double": {2:12,3:6,4:4,5:3,6:2,7:1.5,8:2,9:3,10:4,11:6,12:12},
-                "rtp": RTP_ACTUAL,
-                "volatility": 0.1
+                "max_mult": 12
             }
 
     def generate_result(self, bet: int, user_id: int = None, mode: str = "single") -> Dict:
-        server_seed = secrets.token_hex(32)
-        client_seed = secrets.token_hex(16)
+        server_seed, client_seed = ProvablyFair.generate_seeds()
         nonce = secrets.randbelow(1000000)
 
         if mode == "single":
@@ -1177,11 +1175,9 @@ class DiceGame(BaseGame):
             result = d1 + d2
             base_mult = self.settings['double'][result]
 
-        base_win = int(bet * base_mult)
         return {
             "result": result,
             "base_mult": base_mult,
-            "base_win": base_win,
             "mode": mode,
             "server_seed": server_seed,
             "client_seed": client_seed,
@@ -1189,13 +1185,9 @@ class DiceGame(BaseGame):
             "hash": ProvablyFair.get_hash(server_seed, client_seed, nonce)
         }
 
-    async def calculate_win(self, bet: int, result: Dict, user_id: int) -> int:
-        base_win = result["base_win"]
-        return await self.apply_rtp(base_win, bet, user_id)
+    def calculate_base_win(self, bet: int, result: Dict) -> int:
+        return int(bet * result["base_mult"])
 
-# ============================================
-# РУЛЕТКА (Roulette)
-# ============================================
 class RouletteGame(BaseGame):
     def __init__(self):
         super().__init__("roulette")
@@ -1224,13 +1216,11 @@ class RouletteGame(BaseGame):
                 "odd": 2,
                 "low": 2,
                 "high": 2,
-                "rtp": RTP_ACTUAL,
-                "volatility": 0.1
+                "max_mult": 36
             }
 
     def generate_result(self, bet: int, user_id: int = None) -> Dict:
-        server_seed = secrets.token_hex(32)
-        client_seed = secrets.token_hex(16)
+        server_seed, client_seed = ProvablyFair.generate_seeds()
         nonce = secrets.randbelow(1000000)
         seed = ProvablyFair.get_hash(server_seed, client_seed, nonce)
         number = ProvablyFair.get_random_number(seed, 0, 36)
@@ -1243,24 +1233,30 @@ class RouletteGame(BaseGame):
             "hash": seed
         }
 
-    async def calculate_win(self, bet: int, result: Dict, bet_type: str, user_id: int, bet_number: int = None) -> int:
+    def calculate_base_win(self, bet: int, result: Dict, bet_type: str, bet_number: int = None) -> int:
         num = result["number"]
-        base_mult = 0
-
         if bet_type == "straight" and bet_number == num:
-            base_mult = self.settings.get('straight', 36)
+            mult = self.settings['straight']
         elif bet_type == "split" and bet_number:
             if abs(bet_number - num) in [1, 3]:
-                base_mult = self.settings.get('split', 18)
+                mult = self.settings['split']
+            else:
+                return 0
         elif bet_type == "street" and bet_number:
             if (num - 1) // 3 == (bet_number - 1) // 3:
-                base_mult = self.settings.get('street', 12)
+                mult = self.settings['street']
+            else:
+                return 0
         elif bet_type == "corner" and bet_number:
             if num in [bet_number, bet_number+1, bet_number+3, bet_number+4]:
-                base_mult = self.settings.get('corner', 9)
+                mult = self.settings['corner']
+            else:
+                return 0
         elif bet_type == "sixline" and bet_number:
             if (num - 1) // 3 in [bet_number, bet_number+1]:
-                base_mult = self.settings.get('sixline', 6)
+                mult = self.settings['sixline']
+            else:
+                return 0
         elif bet_type == "column" and bet_number:
             columns = {
                 1: [1,4,7,10,13,16,19,22,25,28,31,34],
@@ -1268,33 +1264,32 @@ class RouletteGame(BaseGame):
                 3: [3,6,9,12,15,18,21,24,27,30,33,36]
             }
             if num in columns.get(bet_number, []):
-                base_mult = self.settings.get('column', 3)
+                mult = self.settings['column']
+            else:
+                return 0
         elif bet_type == "dozen" and bet_number:
             dozens = {1: range(1,13), 2: range(13,25), 3: range(25,37)}
             if num in dozens.get(bet_number, []):
-                base_mult = self.settings.get('dozen', 3)
+                mult = self.settings['dozen']
+            else:
+                return 0
         elif bet_type == "red" and result["color"] == "red":
-            base_mult = self.settings.get('red', 2)
+            mult = self.settings['red']
         elif bet_type == "black" and result["color"] == "black":
-            base_mult = self.settings.get('black', 2)
+            mult = self.settings['black']
         elif bet_type == "even" and num > 0 and num % 2 == 0:
-            base_mult = self.settings.get('even', 2)
+            mult = self.settings['even']
         elif bet_type == "odd" and num % 2 == 1:
-            base_mult = self.settings.get('odd', 2)
+            mult = self.settings['odd']
         elif bet_type == "low" and 1 <= num <= 18:
-            base_mult = self.settings.get('low', 2)
+            mult = self.settings['low']
         elif bet_type == "high" and 19 <= num <= 36:
-            base_mult = self.settings.get('high', 2)
-
-        if base_mult == 0:
+            mult = self.settings['high']
+        else:
             return 0
 
-        base_win = bet * base_mult
-        return await self.apply_rtp(base_win, bet, user_id)
+        return bet * mult
 
-# ============================================
-# MINES
-# ============================================
 class MinesGame(BaseGame):
     def __init__(self):
         super().__init__("mines")
@@ -1303,15 +1298,13 @@ class MinesGame(BaseGame):
         await super().load_settings()
         if not self.settings:
             self.settings = {
-                "rtp": RTP_ACTUAL,
-                "volatility": 0.15,
                 "gold_bonus": 0.1,
-                "difficulty_mult": {"easy": 0.8, "medium": 1.0, "hard": 1.2, "extreme": 1.5}
+                "difficulty_mult": {"easy": 0.8, "medium": 1.0, "hard": 1.2, "extreme": 1.5},
+                "max_mult": 1000
             }
 
     def generate_result(self, bet: int, user_id: int = None, mines: int = 3, difficulty: str = "medium") -> Dict:
-        server_seed = secrets.token_hex(32)
-        client_seed = secrets.token_hex(16)
+        server_seed, client_seed = ProvablyFair.generate_seeds()
         nonce = secrets.randbelow(1000000)
 
         total_cells = 25
@@ -1341,7 +1334,7 @@ class MinesGame(BaseGame):
             "hash": ProvablyFair.get_hash(server_seed, client_seed, nonce)
         }
 
-    async def calculate_win(self, bet: int, result: Dict, revealed: List[int], user_id: int) -> int:
+    def calculate_base_win(self, bet: int, result: Dict, revealed: List[int]) -> int:
         if not revealed:
             return 0
         for cell in revealed:
@@ -1354,12 +1347,8 @@ class MinesGame(BaseGame):
         base_mult = safe / (safe - len(revealed) + 1)
         gold_bonus = 1 + self.settings.get('gold_bonus', 0.1) * sum(1 for c in revealed if c in result["gold_positions"])
         diff_mult = result["difficulty_mult"]
-        base_win = int(bet * base_mult * gold_bonus * diff_mult)
-        return await self.apply_rtp(base_win, bet, user_id)
+        return int(bet * base_mult * gold_bonus * diff_mult)
 
-# ============================================
-# PLINKO
-# ============================================
 class PlinkoGame(BaseGame):
     def __init__(self):
         super().__init__("plinko")
@@ -1371,13 +1360,11 @@ class PlinkoGame(BaseGame):
                 "low": [16,9,2,1.4,1.2,1.1,1,0.5,0.5,1,1.1,1.2,1.4,2,9,16],
                 "medium": [22,12,3,1.8,1.4,1.2,0.8,0.3,0.3,0.8,1.2,1.4,1.8,3,12,22],
                 "high": [33,18,5,2.5,1.8,1.3,0.5,0.2,0.2,0.5,1.3,1.8,2.5,5,18,33],
-                "rtp": RTP_ACTUAL,
-                "volatility": 0.15
+                "max_mult": 33
             }
 
     def generate_result(self, bet: int, user_id: int = None, risk: str = "medium") -> Dict:
-        server_seed = secrets.token_hex(32)
-        client_seed = secrets.token_hex(16)
+        server_seed, client_seed = ProvablyFair.generate_seeds()
         nonce = secrets.randbelow(1000000)
 
         rows = 16
@@ -1404,13 +1391,9 @@ class PlinkoGame(BaseGame):
             "hash": ProvablyFair.get_hash(server_seed, client_seed, nonce)
         }
 
-    async def calculate_win(self, bet: int, result: Dict, user_id: int) -> int:
-        base_win = int(bet * result["base_mult"])
-        return await self.apply_rtp(base_win, bet, user_id)
+    def calculate_base_win(self, bet: int, result: Dict) -> int:
+        return int(bet * result["base_mult"])
 
-# ============================================
-# КЕНО (KENO)
-# ============================================
 class KenoGame(BaseGame):
     def __init__(self):
         super().__init__("keno")
@@ -1429,13 +1412,11 @@ class KenoGame(BaseGame):
                     7: {7:5000,6:150,5:15,4:2},
                     8: {8:15000,7:500,6:50,5:5,4:1}
                 },
-                "rtp": RTP_ACTUAL,
-                "volatility": 0.1
+                "max_mult": 15000
             }
 
     def generate_result(self, bet: int, user_id: int = None) -> Dict:
-        server_seed = secrets.token_hex(32)
-        client_seed = secrets.token_hex(16)
+        server_seed, client_seed = ProvablyFair.generate_seeds()
         nonce = secrets.randbelow(1000000)
 
         nums = list(range(1,81))
@@ -1453,20 +1434,96 @@ class KenoGame(BaseGame):
             "hash": ProvablyFair.get_hash(server_seed, client_seed, nonce)
         }
 
-    async def calculate_win(self, bet: int, result: Dict, picks: List[int], user_id: int) -> int:
+    def calculate_base_win(self, bet: int, result: Dict, picks: List[int]) -> int:
         winning = result["winning"]
         matches = sum(1 for p in picks if p in winning)
         cnt = len(picks)
         payouts = self.settings['payouts']
         if cnt in payouts and matches in payouts[cnt]:
-            base_mult = payouts[cnt][matches]
-            base_win = bet * base_mult
-            return await self.apply_rtp(base_win, bet, user_id)
+            mult = payouts[cnt][matches]
+            return bet * mult
         return 0
 
-# ============================================
-# СЛОТ DOG HOUSE (с бонусной игрой Sticky Wild)
-# ============================================
+class BlackjackGame(BaseGame):
+    def __init__(self):
+        super().__init__("blackjack")
+        self.suits = ["♠", "♥", "♦", "♣"]
+        self.ranks = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
+        self.values = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"10":10,"J":10,"Q":10,"K":10,"A":11}
+
+    async def load_settings(self):
+        await super().load_settings()
+        if not self.settings:
+            self.settings = {
+                "decks": 4,
+                "blackjack_payout": 1.5,
+                "max_mult": 3
+            }
+
+    def generate_result(self, bet: int, user_id: int = None) -> Dict:
+        server_seed, client_seed = ProvablyFair.generate_seeds()
+        nonce = secrets.randbelow(1000000)
+        deck = [(rank, suit) for suit in self.suits for rank in self.ranks] * self.settings['decks']
+        shuffled = self._shuffle_deck(deck, server_seed, client_seed, nonce)
+        player_hand = [shuffled[0], shuffled[2]]
+        dealer_hand = [shuffled[1], shuffled[3]]
+        remaining = shuffled[4:]
+        player_score = self._hand_score(player_hand)
+        dealer_up = dealer_hand[0]
+        return {
+            "player_hand": player_hand,
+            "dealer_hand": dealer_hand,
+            "deck": remaining,
+            "player_score": player_score,
+            "dealer_upcard": dealer_up,
+            "server_seed": server_seed,
+            "client_seed": client_seed,
+            "nonce": nonce,
+            "hash": ProvablyFair.get_hash(server_seed, client_seed, nonce)
+        }
+
+    def _shuffle_deck(self, deck, server_seed, client_seed, nonce):
+        shuffled = deck.copy()
+        for i in range(len(shuffled)-1, 0, -1):
+            seed = ProvablyFair.get_hash(server_seed, client_seed, nonce + i)
+            j = ProvablyFair.get_random_number(seed, 0, i)
+            shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+        return shuffled
+
+    def _hand_score(self, hand):
+        score = 0
+        aces = 0
+        for rank,_ in hand:
+            if rank == "A":
+                aces += 1
+                score += 11
+            else:
+                score += self.values[rank]
+        while score > 21 and aces:
+            score -= 10
+            aces -= 1
+        return score
+
+    def dealer_play(self, dealer_hand, deck):
+        score = self._hand_score(dealer_hand)
+        while score < 17 and deck:
+            dealer_hand.append(deck.pop(0))
+            score = self._hand_score(dealer_hand)
+        return dealer_hand
+
+    def calculate_base_win(self, bet: int, player_hand, dealer_hand) -> int:
+        player_score = self._hand_score(player_hand)
+        dealer_score = self._hand_score(dealer_hand)
+        if player_score > 21:
+            return 0
+        if dealer_score > 21:
+            return bet * 2
+        if player_score > dealer_score:
+            return bet * 2
+        if player_score == dealer_score:
+            return bet
+        return 0
+
 class DogHouseGame(BaseGame):
     def __init__(self):
         super().__init__("doghouse")
@@ -1485,8 +1542,7 @@ class DogHouseGame(BaseGame):
                 "free_spins_mult": 10,
                 "bonus_game": "sticky_wild",
                 "wild_multipliers": [2, 3, 4, 5],
-                "rtp": RTP_ACTUAL,
-                "volatility": 0.2
+                "max_mult": 500
             }
         cum = 0
         self.cum_weights = []
@@ -1496,12 +1552,10 @@ class DogHouseGame(BaseGame):
         self.total_weight = cum
 
     def generate_result(self, bet: int, user_id: int = None, force_bonus: bool = False) -> Dict:
-        server_seed = secrets.token_hex(32)
-        client_seed = secrets.token_hex(16)
+        server_seed, client_seed = ProvablyFair.generate_seeds()
         nonce = secrets.randbelow(1000000)
 
-        rows = self.settings['rows']
-        cols = self.settings['reels']
+        rows, cols = self.settings['rows'], self.settings['reels']
         matrix = []
         for i in range(rows):
             row = []
@@ -1515,14 +1569,12 @@ class DogHouseGame(BaseGame):
                 row.append(self.settings['symbols'][symbol_index])
             matrix.append(row)
 
-        base_win = self._calculate_base_win(matrix, bet)
         scatter = self.settings['scatter']
         scatter_count = sum(row.count(scatter) for row in matrix)
         bonus_triggered = force_bonus or (scatter_count >= 3)
 
         return {
             "matrix": matrix,
-            "base_win": base_win,
             "bonus_triggered": bonus_triggered,
             "scatter_count": scatter_count,
             "server_seed": server_seed,
@@ -1531,12 +1583,12 @@ class DogHouseGame(BaseGame):
             "hash": ProvablyFair.get_hash(server_seed, client_seed, nonce)
         }
 
-    def _calculate_base_win(self, matrix: List[List[str]], bet: int) -> int:
-        win = 0
+    def calculate_base_win(self, bet: int, result: Dict) -> int:
+        matrix = result["matrix"]
         wild = self.settings['wild']
         values = self.settings['values']
         symbols = self.settings['symbols']
-
+        win = 0
         for row in matrix:
             if all(s == row[0] or s == wild for s in row):
                 main = next(s for s in row if s != wild) if any(s != wild for s in row) else wild
@@ -1545,21 +1597,15 @@ class DogHouseGame(BaseGame):
                 win += bet * mult
         return win
 
-    async def calculate_win(self, bet: int, result: Dict, user_id: int) -> int:
-        base_win = result["base_win"]
-        return await self.apply_rtp(base_win, bet, user_id)
-
-    async def play_bonus_game(self, user_id: int, bet: int) -> Dict:
+    async def play_bonus_game(self, user_id: int, bet: int) -> int:
         spins = 10
         sticky_positions = []
         total_win = 0
         wild = self.settings['wild']
-        rows = self.settings['rows']
-        cols = self.settings['reels']
+        rows, cols = self.settings['rows'], self.settings['reels']
 
         for spin in range(spins):
-            server_seed = secrets.token_hex(32)
-            client_seed = secrets.token_hex(16)
+            server_seed, client_seed = ProvablyFair.generate_seeds()
             nonce = secrets.randbelow(1000000)
 
             matrix = []
@@ -1592,14 +1638,13 @@ class DogHouseGame(BaseGame):
                     spin_win += bet * mult
 
             sticky_mult = 1 + len(sticky_positions) * 0.2
+            if sticky_mult > 3.0:
+                sticky_mult = 3.0
             spin_win = int(spin_win * sticky_mult)
             total_win += spin_win
 
-        return {"total_win": total_win, "sticky_positions": sticky_positions}
+        return total_win
 
-# ============================================
-# СЛОТ SUGAR RUSH (каскадные барабаны)
-# ============================================
 class SugarRushGame(BaseGame):
     def __init__(self):
         super().__init__("sugarrush")
@@ -1615,11 +1660,8 @@ class SugarRushGame(BaseGame):
                 "values": [2, 3, 4, 5, 8, 12, 20, 30],
                 "wild": "🍬",
                 "scatter": "🍭",
-                "free_spins_mult": 10,
-                "bonus_game": "cascade",
                 "cascade_multiplier": 1.5,
-                "rtp": RTP_ACTUAL,
-                "volatility": 0.25
+                "max_mult": 2000
             }
         cum = 0
         self.cum_weights = []
@@ -1628,9 +1670,8 @@ class SugarRushGame(BaseGame):
             self.cum_weights.append(cum)
         self.total_weight = cum
 
-    def generate_result(self, bet: int, user_id: int = None, force_bonus: bool = False) -> Dict:
-        server_seed = secrets.token_hex(32)
-        client_seed = secrets.token_hex(16)
+    def generate_result(self, bet: int, user_id: int = None) -> Dict:
+        server_seed, client_seed = ProvablyFair.generate_seeds()
         nonce = secrets.randbelow(1000000)
 
         matrix = self._generate_matrix(server_seed, client_seed, nonce)
@@ -1638,12 +1679,10 @@ class SugarRushGame(BaseGame):
 
         scatter = self.settings['scatter']
         scatter_count = sum(row.count(scatter) for row in matrix)
-        bonus_triggered = force_bonus or (scatter_count >= 3)
 
         return {
             "total_win": total_win,
             "cascade_count": cascade_count,
-            "bonus_triggered": bonus_triggered,
             "scatter_count": scatter_count,
             "server_seed": server_seed,
             "client_seed": client_seed,
@@ -1651,9 +1690,8 @@ class SugarRushGame(BaseGame):
             "hash": ProvablyFair.get_hash(server_seed, client_seed, nonce)
         }
 
-    def _generate_matrix(self, server_seed: str, client_seed: str, nonce: int) -> List[List[str]]:
-        rows = self.settings['rows']
-        cols = self.settings['reels']
+    def _generate_matrix(self, server_seed, client_seed, nonce):
+        rows, cols = self.settings['rows'], self.settings['reels']
         matrix = []
         for i in range(rows):
             row = []
@@ -1668,12 +1706,10 @@ class SugarRushGame(BaseGame):
             matrix.append(row)
         return matrix
 
-    def _find_clusters(self, matrix: List[List[str]]) -> List[List[Tuple[int,int]]]:
-        rows = len(matrix)
-        cols = len(matrix[0])
+    def _find_clusters(self, matrix):
+        rows, cols = len(matrix), len(matrix[0])
         visited = [[False]*cols for _ in range(rows)]
         clusters = []
-
         for i in range(rows):
             for j in range(cols):
                 if matrix[i][j] is None or visited[i][j]:
@@ -1698,9 +1734,8 @@ class SugarRushGame(BaseGame):
                     clusters.append(cluster)
         return clusters
 
-    def _apply_gravity(self, matrix: List[List[str]]) -> List[List[str]]:
-        rows = len(matrix)
-        cols = len(matrix[0])
+    def _apply_gravity(self, matrix):
+        rows, cols = len(matrix), len(matrix[0])
         for j in range(cols):
             column = [matrix[i][j] for i in range(rows) if matrix[i][j] is not None]
             column = [None] * (rows - len(column)) + column
@@ -1708,9 +1743,8 @@ class SugarRushGame(BaseGame):
                 matrix[i][j] = column[i]
         return matrix
 
-    def _fill_empty(self, matrix: List[List[str]], server_seed: str, client_seed: str, nonce: int):
-        rows = len(matrix)
-        cols = len(matrix[0])
+    def _fill_empty(self, matrix, server_seed, client_seed, nonce):
+        rows, cols = len(matrix), len(matrix[0])
         for i in range(rows):
             for j in range(cols):
                 if matrix[i][j] is None:
@@ -1722,7 +1756,7 @@ class SugarRushGame(BaseGame):
                             break
                     matrix[i][j] = self.settings['symbols'][symbol_index]
 
-    def _cascade(self, matrix: List[List[str]], bet: int, server_seed: str, client_seed: str, nonce: int) -> Tuple[int, int]:
+    def _cascade(self, matrix, bet, server_seed, client_seed, nonce):
         total_win = 0
         cascade_count = 0
         multiplier = 1.0
@@ -1753,18 +1787,9 @@ class SugarRushGame(BaseGame):
 
         return total_win, cascade_count
 
-    async def calculate_win(self, bet: int, result: Dict, user_id: int) -> int:
-        base_win = result["total_win"]
-        return await self.apply_rtp(base_win, bet, user_id)
+    def calculate_base_win(self, bet: int, result: Dict) -> int:
+        return result["total_win"]
 
-    async def play_bonus_game(self, user_id: int, bet: int) -> int:
-        spins = 10
-        total_win = 0
-        for spin in range(spins):
-            result = self.generate_result(bet, user_id, force_bonus=False)
-            win = await self.calculate_win(bet, result, user_id)
-            total_win += win * 2
-        return total_win
 # ============================================
 # ОСНОВНОЙ КЛАСС БОТА
 # ============================================
@@ -1777,7 +1802,8 @@ class CasinoBot:
             "plinko": PlinkoGame(),
             "keno": KenoGame(),
             "doghouse": DogHouseGame(),
-            "sugarrush": SugarRushGame()
+            "sugarrush": SugarRushGame(),
+            "blackjack": BlackjackGame()
         }
         self.active_games = {}      # для mines
         self.bonus_sessions = {}    # для бонусных игр
@@ -1792,13 +1818,14 @@ class CasinoBot:
             [InlineKeyboardButton(text="🎯 Кено", callback_data="game_keno"),
              InlineKeyboardButton(text="🐶 Dog House", callback_data="game_doghouse")],
             [InlineKeyboardButton(text="🍬 Sugar Rush", callback_data="game_sugarrush"),
-             InlineKeyboardButton(text=get_text('balance', lang), callback_data="balance")],
-            [InlineKeyboardButton(text=get_text('settings', lang), callback_data="settings"),
-             InlineKeyboardButton(text="🏆 Турниры", callback_data="tournaments")],
-            [InlineKeyboardButton(text="🎁 Бонусы", callback_data="bonuses"),
-             InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-            [InlineKeyboardButton(text="👥 Рефералы", callback_data="referrals"),
-             InlineKeyboardButton(text="📜 История", callback_data="history")]
+             InlineKeyboardButton(text="🃏 Блэкджек", callback_data="game_blackjack")],
+            [InlineKeyboardButton(text=get_text('balance', lang), callback_data="balance"),
+             InlineKeyboardButton(text=get_text('settings', lang), callback_data="settings")],
+            [InlineKeyboardButton(text="🏆 Турниры", callback_data="tournaments"),
+             InlineKeyboardButton(text="🎁 Бонусы", callback_data="bonuses")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
+             InlineKeyboardButton(text="👥 Рефералы", callback_data="referrals")],
+            [InlineKeyboardButton(text="📜 История", callback_data="history")]
         ]
         if user_id in ADMIN_IDS:
             buttons.append([InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel")])
@@ -1876,21 +1903,32 @@ class CasinoBot:
                  InlineKeyboardButton(text="🎯 8 чисел", callback_data="keno_pick8")],
                 [InlineKeyboardButton(text="💰 Своя ставка", callback_data="keno_bet")]
             ]
-        elif game_type in ["doghouse", "sugarrush"]:
-            if game_state and game_state.get("bonus_active"):
+        elif game_type == "blackjack":
+            if game_state and game_state.get("active"):
                 buttons = [
-                    [InlineKeyboardButton(text=f"🎰 {get_text('spins_left', lang)} {game_state['spins_left']}", callback_data=f"bonus_spin_{game_type}")],
-                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                    [InlineKeyboardButton(text="🃏 Еще карту", callback_data="blackjack_hit"),
+                     InlineKeyboardButton(text="⏹ Хватит", callback_data="blackjack_stand")],
+                    [InlineKeyboardButton(text="💰 Удвоить", callback_data="blackjack_double"),
+                     InlineKeyboardButton(text="🤝 Страховка", callback_data="blackjack_insurance")],
+                    [InlineKeyboardButton(text="🔄 Новая игра", callback_data="blackjack_new")]
                 ]
             else:
                 buttons = [
-                    [InlineKeyboardButton(text="🎰 10 ⭐", callback_data=f"play_{game_type}_10"),
-                     InlineKeyboardButton(text="🎰 50 ⭐", callback_data=f"play_{game_type}_50")],
-                    [InlineKeyboardButton(text="🎰 100 ⭐", callback_data=f"play_{game_type}_100"),
-                     InlineKeyboardButton(text="🎰 500 ⭐", callback_data=f"play_{game_type}_500")],
-                    [InlineKeyboardButton(text="💰 Своя ставка", callback_data=f"custom_bet_{game_type}"),
-                     InlineKeyboardButton(text=f"🎁 {get_text('buy_bonus', lang)}", callback_data=f"buy_bonus_{game_type}")]
+                    [InlineKeyboardButton(text="🃏 10 ⭐", callback_data="play_blackjack_10"),
+                     InlineKeyboardButton(text="🃏 50 ⭐", callback_data="play_blackjack_50")],
+                    [InlineKeyboardButton(text="🃏 100 ⭐", callback_data="play_blackjack_100"),
+                     InlineKeyboardButton(text="🃏 500 ⭐", callback_data="play_blackjack_500")],
+                    [InlineKeyboardButton(text="💰 Своя ставка", callback_data="custom_bet_blackjack")]
                 ]
+        elif game_type in ["doghouse", "sugarrush"]:
+            buttons = [
+                [InlineKeyboardButton(text="🎰 10 ⭐", callback_data=f"play_{game_type}_10"),
+                 InlineKeyboardButton(text="🎰 50 ⭐", callback_data=f"play_{game_type}_50")],
+                [InlineKeyboardButton(text="🎰 100 ⭐", callback_data=f"play_{game_type}_100"),
+                 InlineKeyboardButton(text="🎰 500 ⭐", callback_data=f"play_{game_type}_500")],
+                [InlineKeyboardButton(text="💰 Своя ставка", callback_data=f"custom_bet_{game_type}"),
+                 InlineKeyboardButton(text=f"🎁 {get_text('buy_bonus', lang)}", callback_data=f"buy_bonus_{game_type}")]
+            ]
 
         buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1913,7 +1951,6 @@ class CasinoBot:
         ]
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    # ---- команды ----
     async def cmd_start(self, message: Message):
         user_id = message.from_user.id
         await Database.create_user(user_id, message.from_user.username,
@@ -1945,7 +1982,6 @@ class CasinoBot:
         ])
         await message.answer(text, reply_markup=kb)
 
-    # ========== ОСНОВНОЙ ОБРАБОТЧИК CALLBACK ==========
     async def callback_handler(self, callback: CallbackQuery, state: FSMContext):
         data = callback.data
         user_id = callback.from_user.id
@@ -1953,17 +1989,13 @@ class CasinoBot:
         user = await Database.get_user(user_id)
         lang = user.get('language', 'ru') if user else 'ru'
 
-        # ---- главное меню ----
         if data == "main_menu":
             await callback.message.edit_text(
                 "🎰 **ГЛАВНОЕ МЕНЮ**",
                 reply_markup=self.get_main_keyboard(lang, user_id)
             )
-
-        # ---- баланс, пополнение, вывод ----
         elif data == "balance":
             await self.cmd_balance(user_id, callback.message)
-
         elif data == "deposit":
             await state.set_state(BetStates.waiting_for_deposit_amount)
             await callback.message.edit_text(
@@ -1972,7 +2004,6 @@ class CasinoBot:
                     [InlineKeyboardButton(text="❌ Отмена", callback_data="balance")]
                 ])
             )
-
         elif data == "withdraw":
             user = await Database.get_user(user_id)
             min_wd = int(await Database.get_setting('min_withdrawal'))
@@ -1986,8 +2017,6 @@ class CasinoBot:
                     [InlineKeyboardButton(text="❌ Отмена", callback_data="balance")]
                 ])
             )
-
-        # ---- игры ----
         elif data.startswith("game_"):
             game = data.replace("game_", "")
             if game in self.games:
@@ -1997,7 +2026,6 @@ class CasinoBot:
                 )
             else:
                 await callback.answer("❌ Игра недоступна", show_alert=True)
-
         elif data.startswith("play_"):
             parts = data.split("_")
             if len(parts) < 3:
@@ -2010,7 +2038,6 @@ class CasinoBot:
                 await callback.answer("❌ Неверная сумма", show_alert=True)
                 return
             await self.play_game(callback, game, bet, lang)
-
         elif data.startswith("custom_bet_"):
             game = data.replace("custom_bet_", "")
             await state.update_data(game_type=game)
@@ -2021,19 +2048,14 @@ class CasinoBot:
                     [InlineKeyboardButton(text="❌ Отмена", callback_data=f"game_{game}")]
                 ])
             )
-
-        # ---- кости ----
         elif data == "dice_single":
             await state.update_data(game_type="dice", mode="single")
             await state.set_state(BetStates.waiting_for_bet)
             await callback.message.edit_text("🎲 Введите сумму:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="game_dice")]]))
-
         elif data == "dice_double":
             await state.update_data(game_type="dice", mode="double")
             await state.set_state(BetStates.waiting_for_bet)
             await callback.message.edit_text("🎲🎲 Введите сумму:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="game_dice")]]))
-
-        # ---- рулетка ----
         elif data.startswith("roulette_"):
             bt = data.replace("roulette_", "")
             if bt == "number":
@@ -2056,8 +2078,6 @@ class CasinoBot:
                 await state.update_data(game_type="roulette", bet_type=bt)
                 await state.set_state(BetStates.waiting_for_bet)
                 await callback.message.edit_text(f"🎡 Введите сумму ставки на {bt}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="game_roulette")]]))
-
-        # ---- plinko ----
         elif data.startswith("plinko_"):
             risk = data.replace("plinko_", "")
             if risk in ["low","medium","high"]:
@@ -2068,8 +2088,6 @@ class CasinoBot:
                 await state.update_data(game_type="plinko", risk="medium")
                 await state.set_state(BetStates.waiting_for_bet)
                 await callback.message.edit_text("📌 Введите сумму (средний риск):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="game_plinko")]]))
-
-        # ---- mines ----
         elif data.startswith("mines_"):
             parts = data.split("_")
             if len(parts) == 3 and parts[1] in ["easy","medium","hard","extreme"]:
@@ -2087,7 +2105,16 @@ class CasinoBot:
                     await callback.answer("Нет активной игры", show_alert=True)
                     return
                 game_data = self.active_games[user_id]
-                win = await self.games["mines"].calculate_win(game_data["bet"], game_data["result"], game_data["revealed"], user_id)
+                base_win = self.games["mines"].calculate_base_win(game_data["bet"], game_data["result"], game_data["revealed"])
+                if base_win == 0:
+                    await callback.answer("❌ Вы проиграли", show_alert=True)
+                    del self.active_games[user_id]
+                    await callback.message.edit_text(
+                        "💥 Вы проиграли!",
+                        reply_markup=self.get_game_keyboard("mines", lang=lang)
+                    )
+                    return
+                win = await self.games["mines"].calculate_win(game_data["bet"], {"base_win": base_win}, user_id)
                 await Database.update_balance(user_id, win, f"Выигрыш Mines")
                 await Database.add_game_history(user_id, "mines", game_data["bet"], win, game_data["result"])
                 await Database.update_jackpot(int(game_data["bet"] * JACKPOT_PERCENT))
@@ -2124,13 +2151,11 @@ class CasinoBot:
                     )
                 else:
                     self.active_games[user_id] = game_data
-                    cur_win = await self.games["mines"].calculate_win(game_data["bet"], game_data["result"], game_data["revealed"], user_id)
+                    cur_win = self.games["mines"].calculate_base_win(game_data["bet"], game_data["result"], game_data["revealed"])
                     await callback.message.edit_text(
                         f"✅ Безопасно! Текущий выигрыш: {cur_win} ⭐",
                         reply_markup=self.get_game_keyboard("mines", game_data, lang=lang)
                     )
-
-        # ---- кено ----
         elif data.startswith("keno_"):
             pk = data.replace("keno_pick", "")
             if pk.isdigit():
@@ -2142,8 +2167,67 @@ class CasinoBot:
                 await state.update_data(game_type="keno", picks=5)
                 await state.set_state(BetStates.waiting_for_bet)
                 await callback.message.edit_text("🎯 Введите 5 чисел и сумму (пример: 5 12 33 45 78 100):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="game_keno")]]))
-
-        # ---- слоты Dog House / Sugar Rush ----
+        elif data.startswith("blackjack_"):
+            if data == "blackjack_new":
+                if user_id in self.blackjack_games:
+                    del self.blackjack_games[user_id]
+                await callback.message.edit_text(
+                    "🃏 Блэкджек",
+                    reply_markup=self.get_game_keyboard("blackjack", lang=lang)
+                )
+            elif data == "blackjack_hit":
+                session = await Database.get_blackjack_session(user_id)
+                if not session:
+                    await callback.answer("Нет активной игры", show_alert=True)
+                    return
+                game_data = session['game_data']
+                bet = session['bet']
+                if not game_data['deck']:
+                    await callback.answer("Колода пуста", show_alert=True)
+                    return
+                new_card = game_data['deck'].pop(0)
+                game_data['player_hand'].append(new_card)
+                game_data['player_score'] = self.games["blackjack"]._hand_score(game_data['player_hand'])
+                if game_data['player_score'] > 21:
+                    await Database.add_game_history(user_id, "blackjack", bet, 0, {"final":"bust"})
+                    await Database.delete_blackjack_session(user_id)
+                    await callback.message.edit_text(
+                        f"❌ **ПЕРЕБОР!**\nВаши карты: {self.format_hand(game_data['player_hand'])} ({game_data['player_score']})\nДилер: {self.format_hand(game_data['dealer_hand'])}",
+                        reply_markup=self.get_game_keyboard("blackjack", lang=lang)
+                    )
+                else:
+                    await Database.save_blackjack_session(user_id, game_data, bet)
+                    await callback.message.edit_text(
+                        f"🃏 Ваши карты: {self.format_hand(game_data['player_hand'])} (очков: {game_data['player_score']})\nДилер: {self.format_hand(game_data['dealer_hand'][:1])} + ?",
+                        reply_markup=self.get_game_keyboard("blackjack", {"active":True}, lang=lang)
+                    )
+            elif data == "blackjack_stand":
+                session = await Database.get_blackjack_session(user_id)
+                if not session:
+                    await callback.answer("Нет активной игры", show_alert=True)
+                    return
+                game_data = session['game_data']
+                bet = session['bet']
+                dealer_hand = game_data['dealer_hand']
+                deck = game_data['deck']
+                dealer_score = self.games["blackjack"]._hand_score(dealer_hand)
+                while dealer_score < 17 and deck:
+                    dealer_hand.append(deck.pop(0))
+                    dealer_score = self.games["blackjack"]._hand_score(dealer_hand)
+                win = self.games["blackjack"].calculate_base_win(bet, game_data['player_hand'], dealer_hand)
+                profit = win - bet
+                if win > 0:
+                    await Database.update_balance(user_id, profit, "Выигрыш блэкджек")
+                await Database.add_game_history(user_id, "blackjack", bet, win, {"player":game_data['player_hand'],"dealer":dealer_hand})
+                await Database.delete_blackjack_session(user_id)
+                await Database.update_jackpot(int(bet * JACKPOT_PERCENT))
+                jackpot = await Database.get_jackpot()
+                await callback.message.edit_text(
+                    f"🃏 Результат:\nВаши: {self.format_hand(game_data['player_hand'])} ({game_data['player_score']})\nДилер: {self.format_hand(dealer_hand)} ({dealer_score})\n\n{'✅' if win>0 else '❌'} Выигрыш: {win} ⭐\n💰 Джекпот: {jackpot} ⭐",
+                    reply_markup=self.get_game_keyboard("blackjack", lang=lang)
+                )
+            else:
+                await callback.answer("Неизвестная команда", show_alert=True)
         elif data.startswith("buy_bonus_"):
             game_type = data.replace("buy_bonus_", "")
             price = await Database.get_bonus_price(game_type)
@@ -2153,29 +2237,24 @@ class CasinoBot:
                 return
             await Database.update_balance(user_id, -price, f"Покупка бонусной игры в {game_type}")
             if game_type == "doghouse":
-                result = await self.games["doghouse"].play_bonus_game(user_id, 10)
-                total_win = result["total_win"]
-            else:  # sugarrush
-                total_win = await self.games["sugarrush"].play_bonus_game(user_id, 10)
+                total_win = await self.games["doghouse"].play_bonus_game(user_id, 10)
+            elif game_type == "sugarrush":
+                total_win = 0  # заглушка, можно реализовать позже
+            else:
+                total_win = 0
             await Database.update_balance(user_id, total_win, f"Выигрыш в бонусной игре {game_type}")
             await callback.message.edit_text(
                 f"🎉 {get_text('bonus_game', lang)} завершена! {get_text('total_win', lang)}: {total_win} ⭐",
                 reply_markup=self.get_game_keyboard(game_type, lang=lang)
             )
-
-        # ---- турниры, бонусы, статистика, рефералы, настройки, история ----
         elif data == "tournaments":
             await self.show_tournaments(callback, lang)
-
         elif data == "bonuses":
             await self.show_bonuses(callback, lang)
-
         elif data == "claim_daily":
             await self.claim_daily(callback, lang)
-
         elif data == "claim_faucet":
             await self.claim_faucet(callback, lang)
-
         elif data == "activate_bonus":
             await state.set_state(BetStates.waiting_for_bonus_code)
             await callback.message.edit_text(
@@ -2184,35 +2263,25 @@ class CasinoBot:
                     [InlineKeyboardButton(text="❌ Отмена", callback_data="bonuses")]
                 ])
             )
-
         elif data == "stats":
             await self.show_stats(callback, lang)
-
         elif data == "referrals":
             await self.show_referrals(callback, lang)
-
         elif data == "settings":
             await self.show_settings(callback, lang)
-
         elif data == "change_language":
             await self.change_language(callback)
-
         elif data == "provably_fair_info":
             await self.provably_fair_info(callback, lang)
-
         elif data == "toggle_pf":
-            user = await Database.get_user(user_id)
             new_val = 0 if user['pf_enabled'] else 1
             async with aiosqlite.connect(DATABASE_PATH) as db:
                 await db.execute('UPDATE users SET pf_enabled = ? WHERE user_id = ?', (new_val, user_id))
                 await db.commit()
             await callback.answer(f"Provably Fair {'включен' if new_val else 'отключен'}", show_alert=True)
             await self.show_settings(callback, lang)
-
         elif data == "history":
             await self.show_history(callback, lang)
-
-        # ---- АДМИНКА ----
         elif data == "admin_panel":
             if user_id not in ADMIN_IDS:
                 await callback.answer("❌ Доступ запрещен", show_alert=True)
@@ -2221,7 +2290,6 @@ class CasinoBot:
             jack = await Database.get_jackpot()
             text = f"👑 **Админ панель**\n\nПользователей: {users}\nДжекпот: {jack} ⭐"
             await callback.message.edit_text(text, reply_markup=self.get_admin_keyboard())
-
         elif data == "admin_stats":
             if user_id not in ADMIN_IDS:
                 return
@@ -2234,7 +2302,6 @@ class CasinoBot:
             jack = await Database.get_jackpot()
             text = f"📊 **Статистика бота**\n\nПользователей: {users}\nИгр: {games}\nСтавок: {bets} ⭐\nПрофит казино: {prof} ⭐\nДжекпот: {jack} ⭐"
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]]))
-
         elif data == "admin_users_menu":
             if user_id not in ADMIN_IDS:
                 return
@@ -2245,7 +2312,6 @@ class CasinoBot:
                 [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]
             ])
             await callback.message.edit_text("👥 Управление пользователями", reply_markup=kb)
-
         elif data == "admin_users_list":
             if user_id not in ADMIN_IDS:
                 return
@@ -2259,7 +2325,6 @@ class CasinoBot:
                 [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_users_menu")]
             ])
             await callback.message.edit_text(text, reply_markup=kb)
-
         elif data.startswith("admin_users_page_"):
             if user_id not in ADMIN_IDS:
                 return
@@ -2276,28 +2341,24 @@ class CasinoBot:
                 nav.append(InlineKeyboardButton(text="▶️ След.", callback_data=f"admin_users_page_{page+1}"))
             kb = InlineKeyboardMarkup(inline_keyboard=[nav, [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_users_menu")]])
             await callback.message.edit_text(text, reply_markup=kb)
-
         elif data == "admin_user_search":
             if user_id not in ADMIN_IDS:
                 return
             await state.set_state(BetStates.waiting_for_user_id)
             await state.update_data(admin_action="search_user")
             await callback.message.edit_text("🔍 Введите ID пользователя:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_users_menu")]]))
-
         elif data == "admin_user_search_username":
             if user_id not in ADMIN_IDS:
                 return
             await state.set_state(BetStates.waiting_for_user_id)
             await state.update_data(admin_action="search_username")
             await callback.message.edit_text("🔍 Введите username (без @):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_users_menu")]]))
-
         elif data == "admin_balance":
             if user_id not in ADMIN_IDS:
                 return
             await state.set_state(BetStates.waiting_for_user_id)
             await state.update_data(admin_action="balance_change")
             await callback.message.edit_text("💰 Введите ID пользователя:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel")]]))
-
         elif data == "admin_rtp":
             if user_id not in ADMIN_IDS:
                 return
@@ -2310,7 +2371,6 @@ class CasinoBot:
                 btns.append([InlineKeyboardButton(text=f"Изменить {g}", callback_data=f"admin_rtp_{g}")])
             btns.append([InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")])
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
-
         elif data.startswith("admin_rtp_"):
             if user_id not in ADMIN_IDS:
                 return
@@ -2318,7 +2378,6 @@ class CasinoBot:
             await state.set_state(BetStates.waiting_for_rtp_change)
             await state.update_data(game_type=game)
             await callback.message.edit_text(f"🎮 Введите новое RTP для {game} (0-200%):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_rtp")]]))
-
         elif data == "admin_slot_edit":
             if user_id not in ADMIN_IDS:
                 return
@@ -2328,17 +2387,14 @@ class CasinoBot:
                 [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]
             ])
             await callback.message.edit_text("🎰 Выберите слот для редактирования:", reply_markup=kb)
-
         elif data == "admin_edit_doghouse":
             if user_id not in ADMIN_IDS:
                 return
             await self.edit_slot(callback, state, "doghouse")
-
         elif data == "admin_edit_sugarrush":
             if user_id not in ADMIN_IDS:
                 return
             await self.edit_slot(callback, state, "sugarrush")
-
         elif data == "admin_wager":
             if user_id not in ADMIN_IDS:
                 return
@@ -2351,20 +2407,17 @@ class CasinoBot:
                 [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]
             ])
             await callback.message.edit_text(text, reply_markup=kb)
-
         elif data == "admin_wager_mult":
             if user_id not in ADMIN_IDS:
                 return
             await state.set_state(BetStates.waiting_for_wager_multiplier)
             await callback.message.edit_text("Введите новый множитель вейджера (число):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_wager")]]))
-
         elif data == "admin_wager_games":
             if user_id not in ADMIN_IDS:
                 return
             await state.set_state(BetStates.waiting_for_admin_action)
             await state.update_data(admin_action="wager_games")
-            await callback.message.edit_text("Введите список игр через запятую (например: dice,roulette,mines,plinko,keno,doghouse,sugarrush):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_wager")]]))
-
+            await callback.message.edit_text("Введите список игр через запятую (например: dice,roulette,mines,plinko,keno,doghouse,sugarrush,blackjack):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_wager")]]))
         elif data == "admin_tournaments_menu":
             if user_id not in ADMIN_IDS:
                 return
@@ -2374,13 +2427,11 @@ class CasinoBot:
                 [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]
             ])
             await callback.message.edit_text("🏆 Управление турнирами", reply_markup=kb)
-
         elif data == "admin_tournament_create":
             if user_id not in ADMIN_IDS:
                 return
             await state.set_state(BetStates.waiting_for_tournament_name)
             await callback.message.edit_text("🏆 Введите название турнира:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_tournaments_menu")]]))
-
         elif data == "admin_tournaments_list":
             if user_id not in ADMIN_IDS:
                 return
@@ -2389,7 +2440,6 @@ class CasinoBot:
             for t in tours:
                 text += f"#{t['tournament_id']} {t['name']} - {t['status']} - приз {t['prize_pool']}\n"
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="admin_tournaments_menu")]]))
-
         elif data == "admin_bonuses_menu":
             if user_id not in ADMIN_IDS:
                 return
@@ -2399,14 +2449,12 @@ class CasinoBot:
                 [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]
             ])
             await callback.message.edit_text("🎁 Управление бонус кодами", reply_markup=kb)
-
         elif data == "admin_bonus_create":
             if user_id not in ADMIN_IDS:
                 return
             await state.set_state(BetStates.waiting_for_bonus_code)
             await state.update_data(admin_action="create_bonus")
             await callback.message.edit_text("🎁 Введите код (например BONUS100):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_bonuses_menu")]]))
-
         elif data == "admin_bonuses_list":
             if user_id not in ADMIN_IDS:
                 return
@@ -2415,7 +2463,6 @@ class CasinoBot:
             for c in codes:
                 text += f"`{c['code']}`: {c['amount']}⭐ использовано {c['used_count']}/{c['max_uses']}\n"
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Назад", callback_data="admin_bonuses_menu")]]))
-
         elif data == "admin_withdrawals":
             if user_id not in ADMIN_IDS:
                 return
@@ -2435,7 +2482,6 @@ class CasinoBot:
                 ])
             kb_buttons.append([InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")])
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
-
         elif data.startswith("confirm_"):
             if user_id not in ADMIN_IDS:
                 return
@@ -2449,7 +2495,6 @@ class CasinoBot:
                     await bot.send_message(uid, f"✅ Ваш вывод на {amt} ⭐ подтверждён и отправлен.")
             await callback.answer("✅ Вывод подтверждён")
             await self.admin_withdrawals(callback)
-
         elif data.startswith("reject_"):
             if user_id not in ADMIN_IDS:
                 return
@@ -2465,13 +2510,11 @@ class CasinoBot:
                     await bot.send_message(uid, f"❌ Ваш вывод на {amt} ⭐ отклонён. Средства возвращены.")
             await callback.answer("❌ Вывод отклонён")
             await self.admin_withdrawals(callback)
-
         elif data == "admin_broadcast":
             if user_id not in ADMIN_IDS:
                 return
             await state.set_state(BetStates.waiting_for_broadcast_message)
             await callback.message.edit_text("📢 Введите сообщение для рассылки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_panel")]]))
-
         elif data == "admin_settings":
             if user_id not in ADMIN_IDS:
                 return
@@ -2491,7 +2534,6 @@ class CasinoBot:
                 [InlineKeyboardButton(text="🏠 Назад", callback_data="admin_panel")]
             ]
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
-
         elif data.startswith("admin_setting_"):
             if user_id not in ADMIN_IDS:
                 return
@@ -2507,12 +2549,10 @@ class CasinoBot:
                 "faucet_cooldown": "Введите перезарядку (минуты):"
             }
             await callback.message.edit_text(desc.get(setting, "Введите значение:"), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_settings")]]))
-
         elif data == "admin_download_db":
             if user_id not in ADMIN_IDS:
                 return
             await callback.message.answer_document(types.FSInputFile(DATABASE_PATH), caption="📦 Бэкап БД")
-
         else:
             await callback.answer()
 
@@ -2540,7 +2580,8 @@ class CasinoBot:
 
         if game_type == "roulette":
             result = game.generate_result(bet, user_id)
-            win = await game.calculate_win(bet, result, kwargs.get("bet_type", "red"), user_id, kwargs.get("bet_number"))
+            base_win = game.calculate_base_win(bet, result, kwargs.get("bet_type"), kwargs.get("bet_number"))
+            win = await game.calculate_win(bet, {"base_win": base_win}, user_id)
         elif game_type == "dice":
             result = game.generate_result(bet, user_id, kwargs.get("mode", "single"))
             win = await game.calculate_win(bet, result, user_id)
@@ -2559,17 +2600,20 @@ class CasinoBot:
         elif game_type == "keno":
             picks = kwargs.get("picks", [])
             result = game.generate_result(bet, user_id)
-            win = await game.calculate_win(bet, result, picks, user_id)
+            base_win = game.calculate_base_win(bet, result, picks)
+            win = await game.calculate_win(bet, {"base_win": base_win}, user_id)
+        elif game_type == "blackjack":
+            result = game.generate_result(bet, user_id)
+            await Database.save_blackjack_session(user_id, result, bet)
+            win = 0
         elif game_type in ["doghouse", "sugarrush"]:
             result = game.generate_result(bet, user_id)
             win = await game.calculate_win(bet, result, user_id)
-            if result.get("bonus_triggered"):
-                await callback.message.answer(f"🎉 {get_text('bonus_game', lang)} активирована! Купите её за отдельную плату.")
         else:
             await callback.answer("❌ Игра не реализована", show_alert=True)
             return
 
-        if game_type != "mines":
+        if game_type != "mines" and game_type != "blackjack":
             if win > 0:
                 await Database.update_balance(user_id, win, f"Выигрыш в {game_type}")
             await Database.add_game_history(user_id, game_type, bet, win, result if 'result' in locals() else {})
@@ -2584,6 +2628,11 @@ class CasinoBot:
             await callback.message.edit_text(
                 text,
                 reply_markup=self.get_game_keyboard(game_type, self.active_games.get(user_id), lang)
+            )
+        elif game_type == "blackjack":
+            await callback.message.edit_text(
+                f"🃏 **БЛЭКДЖЕК**\n\nВаши карты: {self.format_hand(result['player_hand'])} ({result['player_score']})\nДилер: {self.format_hand(result['dealer_hand'][:1])} + ?",
+                reply_markup=self.get_game_keyboard(game_type, {"active": True}, lang)
             )
         else:
             await callback.message.edit_text(
@@ -2614,13 +2663,15 @@ class CasinoBot:
         s += f"\nСтавка: **{bet} ⭐**\n"
         if win > 0:
             s += f"✅ Выигрыш: **{win} ⭐** (Профит: **+{win-bet} ⭐**)"
-        elif win == 0 and game_type not in ["mines"]:
+        elif win == 0 and game_type not in ["mines","blackjack"]:
             s += f"❌ Проигрыш"
         if show_hash and "hash" in result:
             s += f"\n\n🔐 Provably Fair: `{result['hash'][:16]}...`"
         return s
 
-    # ---- методы для турниров, бонусов и т.д. ----
+    def format_hand(self, hand):
+        return " ".join([f"{r}{s}" for r,s in hand])
+
     async def show_tournaments(self, callback: CallbackQuery, lang: str):
         tours = await Database.get_active_tournaments()
         if not tours:
@@ -2763,9 +2814,8 @@ class CasinoBot:
         await state.update_data(slot_type=slot_type)
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_slot_edit")]]))
 
-# ============================================
-# ОБРАБОТЧИКИ СООБЩЕНИЙ
-# ============================================
+casino_bot = CasinoBot()
+
 @dp.message(CommandStart())
 async def start_command(message: Message):
     await casino_bot.cmd_start(message)
@@ -2778,7 +2828,6 @@ async def balance_command(message: Message):
 async def callback_handler(callback: CallbackQuery, state: FSMContext):
     await casino_bot.callback_handler(callback, state)
 
-# ---- обработчики ввода ----
 @dp.message(BetStates.waiting_for_deposit_amount)
 async def handle_deposit(message: Message, state: FSMContext):
     try:
@@ -3135,9 +3184,6 @@ async def handle_tournament_min_bet(message: Message, state: FSMContext):
         await message.answer("❌ Ошибка")
     await state.clear()
 
-# ============================================
-# ПЛАТЕЖИ
-# ============================================
 @dp.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
@@ -3148,9 +3194,6 @@ async def successful_payment_handler(message: Message):
     await Database.update_balance(message.from_user.id, amount, "Пополнение Stars")
     await message.answer(f"✅ Пополнено {amount} ⭐")
 
-# ============================================
-# ФОНОВЫЕ ЗАДАЧИ
-# ============================================
 async def check_tournaments_background():
     while True:
         await Database.check_expired_tournaments()
@@ -3188,9 +3231,6 @@ async def update_vip_status_background():
             ''')
             await db.commit()
 
-# ============================================
-# HTTP-СЕРВЕР ДЛЯ RENDER
-# ============================================
 async def run_http_server():
     app = web.Application()
     async def handle(request):
@@ -3204,9 +3244,6 @@ async def run_http_server():
     await site.start()
     logger.info(f"HTTP сервер на порту {port}")
 
-# ============================================
-# ЗАПУСК
-# ============================================
 async def main():
     await init_db()
     asyncio.create_task(run_http_server())
@@ -3216,8 +3253,6 @@ async def main():
     asyncio.create_task(update_vip_status_background())
     logger.info("🚀 Бот запущен")
     await dp.start_polling(bot)
-
-casino_bot = CasinoBot()
 
 if __name__ == "__main__":
     asyncio.run(main())
