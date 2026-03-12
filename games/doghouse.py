@@ -1,7 +1,7 @@
 import secrets
 import random
 import io
-from typing import List, Dict
+from typing import List, Dict, Optional
 from PIL import Image, ImageDraw, ImageFont
 from .base_game import BaseGame, ProvablyFair
 
@@ -10,21 +10,16 @@ class DogHouseGame(BaseGame):
         super().__init__("doghouse")
         self.rows = 3
         self.cols = 5
-        self.symbols = ["🐶", "🐩", "🐕", "🏠", "💎", "7️⃣", "⭐", "🎰"]
-        self.default_weights = [100,80,60,40,20,10,5,2]
-        self.default_values = [2,3,4,5,8,12,20,30]
-        self.wild = "⭐"
-        self.scatter = "🏠"
 
     async def load_settings(self, db):
         await super().load_settings(db)
         if not self.settings:
             self.settings = {
-                "symbols": self.symbols,
-                "weights": self.default_weights,
-                "values": self.default_values,
-                "wild": self.wild,
-                "scatter": self.scatter,
+                "symbols": ["🐶", "🐩", "🐕", "🏠", "💎", "7️⃣", "⭐", "🎰"],
+                "weights": [100,80,60,40,20,10,5,2],
+                "values": [2,3,4,5,8,12,20,30],
+                "wild": "⭐",
+                "scatter": "🏠",
                 "free_spins_count": 10,
                 "wild_multipliers": [2,3,4,5],
                 "max_mult": 500,
@@ -47,7 +42,7 @@ class DogHouseGame(BaseGame):
 
     def generate_result(self, bet: int, user_id: int = None, force_bonus: bool = False) -> Dict:
         server, client = ProvablyFair.generate_seeds()
-        nonce = secrets.randbelow(1000000)
+        nonce = ProvablyFair.get_random_number(server, 0, 1000000)
         matrix = []
         for i in range(self.rows):
             row = []
@@ -87,7 +82,7 @@ class DogHouseGame(BaseGame):
         wild = self.settings['wild']
         for _ in range(spins):
             server, client = ProvablyFair.generate_seeds()
-            nonce = secrets.randbelow(1000000)
+            nonce = ProvablyFair.get_random_number(server, 0, 1000000)
             matrix = []
             for i in range(self.rows):
                 row = []
@@ -115,23 +110,4 @@ class DogHouseGame(BaseGame):
         return total_win
 
     async def render(self, matrix: List[List[str]], win: int = 0) -> io.BytesIO:
-        cell_size = 100
-        width = self.cols * cell_size
-        height = self.rows * cell_size + 50
-        img = Image.new('RGB', (width, height), color=(30,30,30))
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arial.ttf", 36)
-        except:
-            font = ImageFont.load_default()
-        for i,row in enumerate(matrix):
-            for j,sym in enumerate(row):
-                x = j * cell_size
-                y = i * cell_size
-                draw.rectangle([x,y,x+cell_size-2,y+cell_size-2], outline=(100,100,100), width=2)
-                draw.text((x+20,y+20), sym, fill=(255,255,255), font=font)
-        draw.text((10, height-40), f"Выигрыш: {win}", fill=(255,215,0), font=font)
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        buf.seek(0)
-        return buf
+        return await super().render(matrix, win)  # используем базовый рендер
