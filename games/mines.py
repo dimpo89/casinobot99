@@ -1,5 +1,4 @@
-import secrets
-from typing import List, Dict
+from typing import Dict, List, Optional
 from .base_game import BaseGame, ProvablyFair
 
 class MinesGame(BaseGame):
@@ -19,8 +18,7 @@ class MinesGame(BaseGame):
 
     def generate_result(self, bet: int, user_id: int = None, mines: int = 3, difficulty: str = "medium") -> Dict:
         server, client = ProvablyFair.generate_seeds()
-        nonce = secrets.randbelow(1000000)
-
+        nonce = ProvablyFair.get_random_number(server, 0, 1000000)
         total_cells = 25
         all_cells = list(range(total_cells))
         mine_positions = []
@@ -28,14 +26,12 @@ class MinesGame(BaseGame):
             seed = ProvablyFair.get_hash(server, client, nonce + i)
             idx = ProvablyFair.get_random_number(seed, 0, len(all_cells)-1)
             mine_positions.append(all_cells.pop(idx))
-
         gold_positions = []
         for i in range(2):
             if all_cells:
                 seed = ProvablyFair.get_hash(server, client, nonce + mines + i)
                 idx = ProvablyFair.get_random_number(seed, 0, len(all_cells)-1)
                 gold_positions.append(all_cells.pop(idx))
-
         return {
             "mine_positions": mine_positions,
             "gold_positions": gold_positions,
